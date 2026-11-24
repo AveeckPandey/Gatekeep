@@ -155,10 +155,11 @@ class InMemoryRepository(BaseRepository):
             return workspace_logs[:limit]
 
 
-# Global repository singleton instance for Phase 1
+# Global repository singleton instance for in-memory mode
 repo = InMemoryRepository()
 
 
 def get_repository() -> BaseRepository:
-    """Dependency provider for repository."""
-    return repo
+    """Dependency provider for repository (delegates to centralized getter)."""
+    from app.repositories import get_repository as _central_get_repo
+    return _central_get_repo()

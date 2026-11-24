@@ -1,5 +1,6 @@
 import base64
 import os
+from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from cryptography.fernet import Fernet
 
@@ -27,6 +28,14 @@ class Settings(BaseSettings):
     # Shannon entropy threshold for secret detection (catches random hex >= 3.7 and base64 tokens >= 4.0)
     ENTROPY_THRESHOLD: float = 3.7
     MIN_ENTROPY_STRING_LEN: int = 16
+
+    # Database / Storage Backend ("in_memory" or "dynamodb")
+    REPOSITORY_BACKEND: str = os.getenv("REPOSITORY_BACKEND", "dynamodb")
+    DYNAMODB_TABLE_NAME: str = os.getenv("DYNAMODB_TABLE_NAME", "gatekeep-main")
+    AWS_REGION: str = os.getenv("AWS_REGION", "us-east-1")
+    DYNAMODB_ENDPOINT_URL: Optional[str] = os.getenv("DYNAMODB_ENDPOINT_URL", None)
+    AWS_ACCESS_KEY_ID: Optional[str] = os.getenv("AWS_ACCESS_KEY_ID", None)
+    AWS_SECRET_ACCESS_KEY: Optional[str] = os.getenv("AWS_SECRET_ACCESS_KEY", None)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
