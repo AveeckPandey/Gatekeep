@@ -3,14 +3,15 @@ import re
 import time
 from collections import Counter
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
+
 from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.security.rules import (
-    PATTERNS,
     CREDIT_CARD_CANDIDATE_REGEX,
     INJECTION_PATTERNS,
+    PATTERNS,
     validate_luhn,
 )
 
@@ -226,16 +227,21 @@ class SecurityDetector:
         sanitized_text = self._apply_replacements(text, replacement_spans)
 
         # 5. Policy Decision Evaluation
-        # If prompt injection is found and block_injections is True, always BLOCK
+        non_injection_findings = [
+            f for f in findings if f.category != FindingCategory.PROMPT_INJECTION
+        ]
+
+        # If prompt injection is found and block_injections is True, block
         if has_prompt_injection and block_injections:
             action = "BLOCK"
             is_blocked = True
             block_reason = f"Prompt injection detected: {'; '.join(injection_reasons)}"
         elif policy_mode == PolicyMode.BLOCK:
-            if len(findings) > 0:
+            # When block_injections is False, injection findings do NOT cause BLOCK
+            if len(non_injection_findings) > 0:
                 action = "BLOCK"
                 is_blocked = True
-                reasons = [f"{f.category.value} ({f.type})" for f in findings]
+                reasons = [f"{f.category.value} ({f.type})" for f in non_injection_findings]
                 block_reason = f"Security policy blocked request: {', '.join(set(reasons))}"
             else:
                 action = "ALLOW"
@@ -246,10 +252,11 @@ class SecurityDetector:
             is_blocked = False
             block_reason = None
         else:  # PolicyMode.ALLOW
+            # ALLOW mode (log-only monitor mode): never blocks non-injections and never redacts
             action = "ALLOW"
             is_blocked = False
             block_reason = None
-            sanitized_text = text  # In ALLOW mode, do not redact
+            sanitized_text = text
 
         elapsed_ms = round((time.perf_counter() - start_time) * 1000, 3)
 

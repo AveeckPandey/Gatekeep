@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import {
   Key,
   Plus,
@@ -76,6 +77,12 @@ export default function ApiKeysPage() {
       const resp = await api.createKey(token, activeWorkspace.id, newKeyName.trim());
       setCreatedKeyData(resp);
       setNewKeyName("");
+      // Cache the full plaintext key in session storage so it can be used in the playground
+      if (typeof window !== "undefined") {
+        sessionStorage.setItem("gatekeep_active_key_" + resp.id, resp.api_key);
+        sessionStorage.setItem("gatekeep_latest_key", resp.api_key);
+        sessionStorage.setItem("gatekeep_latest_key_prefix", resp.prefix);
+      }
       await loadKeys();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to create API key";
@@ -263,7 +270,13 @@ export default function ApiKeysPage() {
                 </div>
               </div>
 
-              <div className="flex justify-end pt-2">
+              <div className="flex justify-end gap-2 pt-2">
+                <Link
+                  href="/dashboard/playground"
+                  className="px-4 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 text-xs font-semibold rounded-lg border border-emerald-500/40 transition-colors"
+                >
+                  Test in Attack Playground →
+                </Link>
                 <button
                   onClick={() => setCreatedKeyData(null)}
                   className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg transition-colors"

@@ -1,11 +1,11 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
-from app.models.user import User
-from app.models.workspace import Workspace
-from app.models.policy import Policy
 from app.models.api_key import ApiKey
 from app.models.audit_log import AuditLog
+from app.models.policy import Policy
+from app.models.user import User
+from app.models.workspace import Workspace
 
 
 class BaseRepository(ABC):
@@ -72,7 +72,12 @@ class BaseRepository(ABC):
         pass
 
     @abstractmethod
-    async def update_api_key_last_used(self, key_id: str) -> None:
+    async def update_api_key_last_used(
+        self,
+        key_id: str,
+        workspace_id: Optional[str] = None,
+        key_hash: Optional[str] = None,
+    ) -> None:
         pass
 
     # Audit Log operations

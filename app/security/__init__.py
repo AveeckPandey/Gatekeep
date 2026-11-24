@@ -1,9 +1,9 @@
 from app.security.detector import (
-    SecurityDetector,
-    PolicyMode,
-    FindingCategory,
     Finding,
+    FindingCategory,
     InspectionResult,
+    PolicyMode,
+    SecurityDetector,
     calculate_shannon_entropy,
     detector,
 )

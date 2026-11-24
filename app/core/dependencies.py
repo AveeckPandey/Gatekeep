@@ -1,7 +1,11 @@
+import asyncio
 from typing import Optional, Tuple
-from fastapi import Depends, HTTPException, Header, status
+
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from app.config import settings
+from app.core.cognito import cognito_client, verify_cognito_access_token
 from app.core.security import decode_access_token, hash_api_key
 from app.models.api_key import ApiKey
 from app.models.policy import Policy
@@ -28,7 +32,13 @@ async def get_current_user(
         )
 
     token = credentials.credentials
-    payload = decode_access_token(token)
+    if settings.AUTH_BACKEND == "cognito":
+        try:
+            payload = await asyncio.to_thread(verify_cognito_access_token, token)
+        except Exception as exc:
+            raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
+    else:
+        payload = decode_access_token(token)
     if not payload or "sub" not in payload:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -38,6 +48,16 @@ async def get_current_user(
 
     user_id = payload["sub"]
     user = await repo.get_user_by_id(user_id)
+    if settings.AUTH_BACKEND == "cognito" and not user:
+        try:
+            profile = await asyncio.to_thread(cognito_client().get_user, AccessToken=token)
+            email = next(a["Value"] for a in profile["UserAttributes"] if a["Name"] == "email")
+            user = await repo.create_user(User(id=user_id, email=email, hashed_password=""))
+        except Exception as exc:
+            # A concurrent first request may have created the same profile.
+            user = await repo.get_user_by_id(user_id)
+            if not user:
+                raise HTTPException(status_code=401, detail="Unable to load Cognito user") from exc
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -127,6 +147,10 @@ async def get_gateway_auth(
         policy = Policy(workspace_id=workspace.id)
 
     # Track usage asynchronously
-    await repo.update_api_key_last_used(api_key.id)
+    await repo.update_api_key_last_used(
+        api_key.id,
+        workspace_id=workspace.id,
+        key_hash=api_key.key_hash,
+    )
 
     return api_key, workspace, policy

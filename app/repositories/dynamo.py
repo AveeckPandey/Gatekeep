@@ -1,7 +1,7 @@
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-import boto3
+from typing import Any, List, Optional
+
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
@@ -179,7 +179,9 @@ class DynamoDBRepository(BaseRepository):
         return Policy(
             workspace_id=item["workspace_id"],
             mode=PolicyMode(item["mode"]),
-            block_injections=item["block_injections"],
+            block_injections=item.get("block_injections", True),
+            inspect_responses=item.get("inspect_responses", True),
+            rate_limit_rpm=int(item.get("rate_limit_rpm", 60)),
             upstream_base_url=item["upstream_base_url"],
             encrypted_upstream_api_key=item.get("encrypted_upstream_api_key"),
             updated_at=datetime.fromisoformat(item["updated_at"]),
@@ -193,6 +195,8 @@ class DynamoDBRepository(BaseRepository):
             "workspace_id": policy.workspace_id,
             "mode": policy.mode.value,
             "block_injections": policy.block_injections,
+            "inspect_responses": policy.inspect_responses,
+            "rate_limit_rpm": policy.rate_limit_rpm,
             "upstream_base_url": policy.upstream_base_url,
             "encrypted_upstream_api_key": policy.encrypted_upstream_api_key,
             "updated_at": policy.updated_at.isoformat(),
@@ -325,16 +329,49 @@ class DynamoDBRepository(BaseRepository):
 
         return True
 
-    async def update_api_key_last_used(self, key_id: str) -> None:
+    async def update_api_key_last_used(
+        self,
+        key_id: str,
+        workspace_id: Optional[str] = None,
+        key_hash: Optional[str] = None,
+    ) -> None:
         now_iso = datetime.now(timezone.utc).isoformat()
-        # In single table design, we can update the last_used_at timestamp on the key item
-        # Since hash is available during proxy authentication, proxy tracks usage.
-        pass
+        if workspace_id:
+            try:
+                self.table.update_item(
+                    Key={"PK": f"WORKSPACE#{workspace_id}", "SK": f"APIKEY#{key_id}"},
+                    UpdateExpression="SET last_used_at = :now",
+                    ExpressionAttributeValues={":now": now_iso},
+                )
+            except Exception:
+                pass
+        if key_hash:
+            try:
+                self.table.update_item(
+                    Key={"PK": f"APIKEY#{key_hash}", "SK": "META"},
+                    UpdateExpression="SET last_used_at = :now",
+                    ExpressionAttributeValues={":now": now_iso},
+                )
+            except Exception:
+                pass
 
     # Audit Log operations
     async def create_audit_log(self, log: AuditLog) -> AuditLog:
         timestamp_str = log.created_at.strftime("%Y%m%dT%H%M%S%f")
         ttl_seconds = int(time.time()) + (30 * 86400)  # 30 days retention TTL
+
+        # Cap findings count and details to prevent exceeding DynamoDB 400KB limit
+        bounded_findings = []
+        for f in (log.findings or [])[:50]:
+            if isinstance(f, dict):
+                f_copy = dict(f)
+                if "safe_preview" in f_copy and isinstance(f_copy["safe_preview"], str):
+                    f_copy["safe_preview"] = f_copy["safe_preview"][:100]
+                if "details" in f_copy and isinstance(f_copy["details"], str):
+                    f_copy["details"] = f_copy["details"][:200]
+                bounded_findings.append(f_copy)
+            else:
+                bounded_findings.append(f)
 
         raw_item = {
             "PK": f"WORKSPACE#{log.workspace_id}",
@@ -345,9 +382,9 @@ class DynamoDBRepository(BaseRepository):
             "model": log.model,
             "action": log.action,
             "is_blocked": log.is_blocked,
-            "block_reason": log.block_reason,
+            "block_reason": log.block_reason[:500] if log.block_reason else None,
             "findings_count": log.findings_count,
-            "findings": log.findings,
+            "findings": bounded_findings,
             "inspection_ms": log.inspection_ms,
             "upstream_ms": log.upstream_ms,
             "total_ms": log.total_ms,

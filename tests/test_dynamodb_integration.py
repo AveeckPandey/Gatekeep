@@ -1,12 +1,12 @@
 import json
+
 import boto3
-from httpx import AsyncClient
-from moto import mock_aws
 import pytest
 import respx
+from httpx import AsyncClient
+from moto import mock_aws
 
 from app.db.dynamo import create_gatekeep_table
-from app.models.policy import PolicyMode
 from app.repositories import set_repository
 from app.repositories.dynamo import DynamoDBRepository
 
@@ -195,7 +195,7 @@ async def test_dynamodb_cross_tenant_bola_idor_integration(async_client: AsyncCl
             json={"name": "Tenant 2 Workspace"},
         )
     ).json()
-    ws2_id = ws2["id"]
+    assert ws2["id"] is not None
 
     # Tenant 2 attempts to view Tenant 1's workspace policy in DynamoDB -> 403 Forbidden
     resp = await async_client.get(f"/api/workspaces/{ws1_id}/policy", headers=t2_headers)

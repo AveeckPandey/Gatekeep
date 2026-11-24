@@ -1,4 +1,5 @@
-from typing import List, Optional
+from typing import List
+
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.dependencies import get_current_user, get_workspace_for_user
@@ -45,6 +46,8 @@ def _build_policy_response(policy: Policy) -> PolicyResponse:
         workspace_id=policy.workspace_id,
         mode=policy.mode,
         block_injections=policy.block_injections,
+        inspect_responses=policy.inspect_responses,
+        rate_limit_rpm=policy.rate_limit_rpm,
         upstream_base_url=policy.upstream_base_url,
         has_upstream_api_key=has_key,
         upstream_api_key_preview=preview,
@@ -146,6 +149,12 @@ async def update_workspace_policy(
 
     if payload.block_injections is not None:
         policy.block_injections = payload.block_injections
+
+    if payload.inspect_responses is not None:
+        policy.inspect_responses = payload.inspect_responses
+
+    if payload.rate_limit_rpm is not None:
+        policy.rate_limit_rpm = payload.rate_limit_rpm
 
     if payload.upstream_base_url is not None:
         policy.upstream_base_url = payload.upstream_base_url

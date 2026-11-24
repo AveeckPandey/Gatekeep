@@ -9,7 +9,8 @@ interface AuthContextType {
   token: string | null;
   isLoading: boolean;
   login: (email: string, pass: string) => Promise<void>;
-  register: (email: string, pass: string) => Promise<void>;
+  register: (email: string, pass: string) => Promise<boolean>;
+  demoLogin: () => Promise<void>;
   logout: () => void;
 }
 
@@ -78,11 +79,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setIsLoading(true);
     try {
       const resp = await api.register(email, pass);
+      if ("confirmation_required" in resp) {
+        if (!resp.confirmation_required) router.push("/login");
+        return resp.confirmation_required;
+      }
       localStorage.setItem("gatekeep_token", resp.access_token);
       document.cookie = `gatekeep_token=${resp.access_token}; path=/; max-age=86400; SameSite=Lax`;
       setToken(resp.access_token);
       setUser(resp.user);
       router.push("/dashboard");
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const demoLogin = async () => {
+    setIsLoading(true);
+    try {
+      const resp = await api.demoAuth();
+      localStorage.setItem("gatekeep_token", resp.access_token);
+      if (resp.demo_workspace_id) {
+        localStorage.setItem("gatekeep_active_ws", resp.demo_workspace_id);
+      }
+      if (resp.demo_api_key) {
+        localStorage.setItem("gatekeep_demo_key", resp.demo_api_key);
+      }
+      document.cookie = `gatekeep_token=${resp.access_token}; path=/; max-age=86400; SameSite=Lax`;
+      setToken(resp.access_token);
+      setUser(resp.user);
+      router.push("/dashboard/playground");
     } finally {
       setIsLoading(false);
     }
@@ -98,7 +124,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, token, isLoading, login, register, demoLogin, logout }}>
       {children}
     </AuthContext.Provider>
   );

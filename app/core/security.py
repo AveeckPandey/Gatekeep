@@ -2,6 +2,7 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
+
 import bcrypt
 import jwt
 from cryptography.fernet import Fernet, InvalidToken
@@ -10,9 +11,12 @@ from app.config import settings
 
 
 def hash_password(password: str) -> str:
-    """Hashes a password with bcrypt."""
+    """Hashes a password with bcrypt (capped at bcrypt's 72-byte safe limit)."""
+    pw_bytes = password.encode("utf-8")
+    if len(pw_bytes) > 72:
+        raise ValueError("Password cannot exceed 72 bytes")
     salt = bcrypt.gensalt(rounds=12)
-    return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
+    return bcrypt.hashpw(pw_bytes, salt).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:

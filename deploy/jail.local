@@ -1,0 +1,50 @@
+# GateKeep Fail2Ban Configuration (/etc/fail2ban/jail.local)
+# Protects SSH and Nginx reverse proxy from brute-force attacks and volumetric floods
+
+[DEFAULT]
+# Ban hosts for 1 hour by default
+bantime = 1h
+
+# Time window for counting failed attempts: 10 minutes
+findtime = 10m
+
+# Number of failures before ban
+maxretry = 5
+
+# Ban action: integrate directly with Ubuntu UFW firewall
+banaction = ufw
+banaction_allports = ufw
+
+# Ignore localhost and private loopback
+ignoreip = 127.0.0.1/8 ::1
+
+[sshd]
+enabled = true
+port = ssh
+mode = aggressive
+logpath = %(sshd_log)s
+backend = systemd
+maxretry = 3
+bantime = 24h
+
+[nginx-http-auth]
+enabled = true
+port = http,https
+logpath = /var/log/nginx/error.log
+maxretry = 3
+bantime = 12h
+
+[nginx-limit-req]
+enabled = true
+port = http,https
+logpath = /var/log/nginx/error.log
+maxretry = 10
+findtime = 2m
+bantime = 2h
+
+[nginx-botsearch]
+enabled = true
+port = http,https
+logpath = /var/log/nginx/error.log
+maxretry = 2
+bantime = 48h

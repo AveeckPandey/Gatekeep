@@ -1,8 +1,7 @@
-import time
-from httpx import AsyncClient
 import pytest
+from httpx import AsyncClient
 
-from app.security.detector import SecurityDetector, PolicyMode
+from app.security.detector import PolicyMode, SecurityDetector
 
 
 @pytest.mark.asyncio

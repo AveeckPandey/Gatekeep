@@ -1,7 +1,6 @@
-import pytest
 from app.security.detector import (
-    SecurityDetector,
     PolicyMode,
+    SecurityDetector,
     calculate_shannon_entropy,
 )
 from app.security.rules import validate_luhn
@@ -109,6 +108,11 @@ def test_detector_prompt_injections():
         assert res.action == "BLOCK"
         assert res.block_reason is not None
         assert any(f.type == "PROMPT_INJECTION" for f in res.findings)
+
+        # When block_injections is False in BLOCK mode, injection findings do not block
+        res_no_block = detector.inspect(attack, policy_mode=PolicyMode.BLOCK, block_injections=False)
+        assert res_no_block.is_blocked is False
+        assert res_no_block.action == "ALLOW"
 
 
 def test_detector_policy_modes():

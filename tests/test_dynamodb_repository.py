@@ -1,8 +1,9 @@
 import time
 from datetime import datetime, timezone
+
 import boto3
-from moto import mock_aws
 import pytest
+from moto import mock_aws
 
 from app.core.security import encrypt_secret, hash_api_key, hash_password
 from app.db.dynamo import create_gatekeep_table

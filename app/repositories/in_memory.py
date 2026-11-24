@@ -2,11 +2,11 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from app.models.user import User
-from app.models.workspace import Workspace
-from app.models.policy import Policy
 from app.models.api_key import ApiKey
 from app.models.audit_log import AuditLog
+from app.models.policy import Policy
+from app.models.user import User
+from app.models.workspace import Workspace
 from app.repositories.base import BaseRepository
 
 
@@ -135,7 +135,12 @@ class InMemoryRepository(BaseRepository):
                 return True
             return False
 
-    async def update_api_key_last_used(self, key_id: str) -> None:
+    async def update_api_key_last_used(
+        self,
+        key_id: str,
+        workspace_id: Optional[str] = None,
+        key_hash: Optional[str] = None,
+    ) -> None:
         async with self._lock:
             key = self._api_keys.get(key_id)
             if key:

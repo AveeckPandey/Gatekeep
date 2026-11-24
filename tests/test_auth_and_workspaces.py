@@ -168,3 +168,21 @@ async def test_workspace_api_key_lifecycle(async_client: AsyncClient):
     # 4. Verify status is revoked
     list_after_revoke = await async_client.get(f"/api/workspaces/{ws_id}/keys", headers=headers)
     assert list_after_revoke.json()[0]["is_revoked"] is True
+
+
+@pytest.mark.asyncio
+async def test_recruiter_demo_session_provisioning(async_client: AsyncClient):
+    """Verify frictionless 10-second recruiter demo session generation."""
+    resp = await async_client.post("/api/auth/demo")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "access_token" in data
+    assert data["user"]["email"] == "demo@gatekeep.ai"
+    assert data["demo_workspace_id"] is not None
+    assert data["demo_api_key"].startswith("gw_live_")
+
+    # Verify repeated calls return the same session idempotently
+    resp2 = await async_client.post("/api/auth/demo")
+    assert resp2.status_code == 200
+    assert resp2.json()["demo_workspace_id"] == data["demo_workspace_id"]
+    assert resp2.json()["demo_api_key"] != data["demo_api_key"]

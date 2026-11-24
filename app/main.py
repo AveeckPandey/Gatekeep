@@ -1,11 +1,10 @@
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.routes.auth import router as auth_router
-from app.routes.workspace import router as workspace_router
 from app.routes.proxy import router as proxy_router
+from app.routes.workspace import router as workspace_router
 
 app = FastAPI(
     title="GateKeep API",
@@ -14,13 +13,22 @@ app = FastAPI(
 )
 
 # Enable CORS for frontend dashboard (Next.js)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if settings.ENV == "production":
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # Register routers
 app.include_router(auth_router)
@@ -29,12 +37,27 @@ app.include_router(proxy_router)
 
 
 @app.get("/health", tags=["Health"])
-async def health_check():
-    """Service health check endpoint."""
+async def health_check(check_db: bool = False):
+    """Service health check endpoint with optional database connectivity verification."""
+    db_status = "unverified"
+    if check_db:
+        try:
+            from app.repositories import get_repository
+
+            repo = get_repository()
+            if hasattr(repo, "table") and repo.table is not None:
+                repo.table.load()
+                db_status = "connected"
+            else:
+                db_status = "in_memory"
+        except Exception as e:
+            db_status = f"unhealthy: {str(e)}"
+
     return {
-        "status": "healthy",
+        "status": "healthy" if not db_status.startswith("unhealthy") else "degraded",
         "service": settings.APP_NAME,
         "env": settings.ENV,
+        "database": db_status,
     }
 
 

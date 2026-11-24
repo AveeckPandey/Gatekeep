@@ -1,7 +1,7 @@
 import os
-import time
 from decimal import Decimal
 from typing import Any, Dict, Optional
+
 import boto3
 from botocore.exceptions import ClientError
 
@@ -36,9 +36,11 @@ def get_dynamo_client():
     kwargs: Dict[str, Any] = {"region_name": settings.AWS_REGION}
     if settings.DYNAMODB_ENDPOINT_URL:
         kwargs["endpoint_url"] = settings.DYNAMODB_ENDPOINT_URL
-    if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY:
-        kwargs["aws_access_key_id"] = settings.AWS_ACCESS_KEY_ID
-        kwargs["aws_secret_access_key"] = settings.AWS_SECRET_ACCESS_KEY
+        if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY:
+            kwargs["aws_access_key_id"] = settings.AWS_ACCESS_KEY_ID
+            kwargs["aws_secret_access_key"] = settings.AWS_SECRET_ACCESS_KEY
+            if os.getenv("AWS_SESSION_TOKEN"):
+                kwargs["aws_session_token"] = os.getenv("AWS_SESSION_TOKEN")
     return boto3.client("dynamodb", **kwargs)
 
 
@@ -47,9 +49,11 @@ def get_dynamo_resource():
     kwargs: Dict[str, Any] = {"region_name": settings.AWS_REGION}
     if settings.DYNAMODB_ENDPOINT_URL:
         kwargs["endpoint_url"] = settings.DYNAMODB_ENDPOINT_URL
-    if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY:
-        kwargs["aws_access_key_id"] = settings.AWS_ACCESS_KEY_ID
-        kwargs["aws_secret_access_key"] = settings.AWS_SECRET_ACCESS_KEY
+        if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY:
+            kwargs["aws_access_key_id"] = settings.AWS_ACCESS_KEY_ID
+            kwargs["aws_secret_access_key"] = settings.AWS_SECRET_ACCESS_KEY
+            if os.getenv("AWS_SESSION_TOKEN"):
+                kwargs["aws_session_token"] = os.getenv("AWS_SESSION_TOKEN")
     return boto3.resource("dynamodb", **kwargs)
 
 

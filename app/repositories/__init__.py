@@ -1,8 +1,10 @@
 from typing import Optional
+
 from app.config import settings
 from app.repositories.base import BaseRepository
-from app.repositories.in_memory import InMemoryRepository, repo as in_memory_repo
 from app.repositories.dynamo import DynamoDBRepository
+from app.repositories.in_memory import InMemoryRepository
+from app.repositories.in_memory import repo as in_memory_repo
 
 _active_repo: Optional[BaseRepository] = None
 

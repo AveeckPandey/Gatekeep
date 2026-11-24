@@ -2,15 +2,16 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
-import { ShieldAlert, Lock, Mail, ArrowRight, AlertCircle } from "lucide-react";
+import { ShieldAlert, Lock, Mail, ArrowRight, AlertCircle, Sparkles } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
 export default function LoginPage() {
-  const { login } = useAuth();
+  const { login, demoLogin } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isDemoLoading, setIsDemoLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -24,6 +25,19 @@ export default function LoginPage() {
       setError(msg);
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleDemoAccess = async () => {
+    setError(null);
+    setIsDemoLoading(true);
+    try {
+      await demoLogin();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to launch demo workspace.";
+      setError(msg);
+    } finally {
+      setIsDemoLoading(false);
     }
   };
 
@@ -92,7 +106,28 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <div className="mt-6 pt-6 border-t border-slate-800/80 text-center">
+        {/* Recruiter / Quick Demo Access */}
+        {process.env.NEXT_PUBLIC_ENABLE_DEMO === "true" && <div className="mt-5 pt-5 border-t border-slate-800">
+          <div className="text-center mb-2.5">
+            <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
+              Recruiter & Quick Evaluation
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={handleDemoAccess}
+            disabled={isDemoLoading}
+            className="w-full bg-gradient-to-r from-emerald-500/20 via-teal-500/20 to-cyan-500/20 hover:from-emerald-500/30 hover:via-teal-500/30 hover:to-cyan-500/30 border border-emerald-500/40 hover:border-emerald-500/70 text-emerald-300 font-bold py-2.5 rounded-lg text-xs flex items-center justify-center gap-2 transition-all shadow-lg shadow-emerald-950/40 disabled:opacity-50"
+          >
+            <Sparkles className="w-4 h-4 text-emerald-400 animate-pulse" />
+            <span>{isDemoLoading ? "Launching Demo Gateway..." : "⚡ Try Demo Workspace (10s Recruiter Access)"}</span>
+          </button>
+          <p className="text-[11px] text-slate-500 text-center mt-2 leading-relaxed">
+            Pre-seeded live attack playground & mock LLM with zero signup or API key setup required.
+          </p>
+        </div>}
+
+        <div className="mt-5 pt-5 border-t border-slate-800/80 text-center">
           <p className="text-xs text-slate-400">
             Don&apos;t have an account?{" "}
             <Link href="/register" className="text-emerald-400 hover:text-emerald-300 font-semibold">

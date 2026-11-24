@@ -4,9 +4,14 @@ import React, { useState } from "react";
 import Link from "next/link";
 import { Lock, Mail, ArrowRight, AlertCircle, ShieldCheck } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import { api } from "@/lib/api";
+import { useRouter } from "next/navigation";
 
 export default function RegisterPage() {
   const { register } = useAuth();
+  const router = useRouter();
+  const [confirmationRequired, setConfirmationRequired] = useState(false);
+  const [confirmationCode, setConfirmationCode] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -29,7 +34,7 @@ export default function RegisterPage() {
 
     setIsSubmitting(true);
     try {
-      await register(email, password);
+      setConfirmationRequired(await register(email, password));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Registration failed. Please try again.";
       setError(msg);
@@ -62,7 +67,14 @@ export default function RegisterPage() {
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        {confirmationRequired && (
+          <form onSubmit={async (e) => { e.preventDefault(); setError(null); try { await api.confirmRegistration(email, confirmationCode); router.push("/login"); } catch (err) { setError(err instanceof Error ? err.message : "Confirmation failed"); } }} className="space-y-4 mb-5">
+            <label className="text-xs text-slate-300">Email confirmation code</label>
+            <input value={confirmationCode} onChange={(e) => setConfirmationCode(e.target.value)} required className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200" />
+            <button type="submit" className="mt-3 bg-emerald-500 text-slate-950 px-4 py-2 rounded-lg">Confirm account</button>
+          </form>
+        )}
+        {!confirmationRequired && <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="text-xs font-medium text-slate-300 block mb-1.5">Email Address</label>
             <div className="relative">
@@ -120,7 +132,7 @@ export default function RegisterPage() {
             <span>{isSubmitting ? "Creating Tenant..." : "Create Tenant Workspace"}</span>
             <ArrowRight className="w-4 h-4" />
           </button>
-        </form>
+        </form>}
 
         <div className="mt-6 pt-6 border-t border-slate-800/80 text-center">
           <p className="text-xs text-slate-400">

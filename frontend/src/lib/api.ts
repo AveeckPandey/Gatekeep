@@ -26,6 +26,8 @@ export interface Policy {
   workspace_id: string;
   mode: PolicyMode;
   block_injections: boolean;
+  inspect_responses?: boolean;
+  rate_limit_rpm?: number;
   upstream_base_url: string;
   has_upstream_api_key: boolean;
   upstream_api_key_preview?: string | null;
@@ -35,6 +37,8 @@ export interface Policy {
 export interface PolicyUpdateRequest {
   mode?: PolicyMode;
   block_injections?: boolean;
+  inspect_responses?: boolean;
+  rate_limit_rpm?: number;
   upstream_base_url?: string;
   upstream_api_key?: string;
 }
@@ -94,6 +98,8 @@ export interface AegisGateMeta {
   block_reason?: string | null;
   findings_count: number;
   findings: Finding[];
+  response_findings_count?: number;
+  response_findings?: Finding[];
   inspection_ms: number;
   upstream_ms?: number | null;
   total_ms: number;
@@ -148,9 +154,15 @@ async function request<T>(
 export const api = {
   // Auth
   register: (email: string, password: string) =>
-    request<TokenResponse>("/api/auth/register", {
+    request<TokenResponse | { confirmation_required: boolean }>("/api/auth/register", {
       method: "POST",
       body: JSON.stringify({ email, password }),
+    }),
+
+  confirmRegistration: (email: string, code: string) =>
+    request<{ message: string }>("/api/auth/confirm", {
+      method: "POST",
+      body: JSON.stringify({ email, code }),
     }),
 
   login: (email: string, password: string) =>
@@ -158,6 +170,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ email, password }),
     }),
+
+  demoAuth: () =>
+    request<TokenResponse & { demo_workspace_id?: string; demo_api_key?: string }>(
+      "/api/auth/demo",
+      { method: "POST" }
+    ),
 
   getMe: (token: string) => request<User>("/api/auth/me", { method: "GET" }, token),
 

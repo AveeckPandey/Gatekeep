@@ -61,14 +61,21 @@ export default function AttackPlaygroundPage() {
   const { activeWorkspace } = useWorkspace();
 
   const [keys, setKeys] = useState<ApiKey[]>([]);
-  const [selectedApiKey, setSelectedApiKey] = useState<string>("");
-  const [model, setModel] = useState<string>("nvidia/nemotron-4-340b-instruct");
+  const [selectedApiKey, setSelectedApiKey] = useState<string>(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem("gatekeep_demo_key") || "";
+    }
+    return "";
+  });
+  const [model, setModel] = useState<string>("");
+  const [provider, setProvider] = useState<string>("");
   const [promptText, setPromptText] = useState<string>(PRESETS[0].text);
 
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [responseResult, setResponseResult] = useState<ProxyResponseState | null>(null);
 
   const [copiedResponse, setCopiedResponse] = useState<boolean>(false);
+  const [keyWarning, setKeyWarning] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -79,9 +86,18 @@ export default function AttackPlaygroundPage() {
       .then((kList) => {
         if (!isMounted) return;
         setKeys(kList);
-        const active = kList.find((k) => !k.is_revoked);
-        if (active) {
-          setSelectedApiKey((prev) => prev || active.prefix);
+        const cachedLatest = typeof window !== "undefined" ? sessionStorage.getItem("gatekeep_latest_key") : null;
+        if (cachedLatest) {
+          setSelectedApiKey((prev) => prev || cachedLatest);
+        } else if (activeWorkspace.id.startsWith("ws_demo")) {
+          const demoKey = (typeof window !== "undefined" && sessionStorage.getItem("gatekeep_demo_key")) || "gw_live_demo_recruiter_key_instant10s";
+          setSelectedApiKey((prev) => prev || demoKey);
+        } else {
+          const active = kList.find((k) => !k.is_revoked);
+          if (active) {
+            setSelectedApiKey((prev) => prev || active.prefix);
+            setKeyWarning(`Selected prefix "${active.prefix}". Paste your saved full plaintext key to execute.`);
+          }
         }
       })
       .catch((err: unknown) => {
@@ -92,6 +108,34 @@ export default function AttackPlaygroundPage() {
       isMounted = false;
     };
   }, [token, activeWorkspace]);
+
+  const handleSelectKey = (k: ApiKey) => {
+    if (typeof window !== "undefined") {
+      const cached = sessionStorage.getItem("gatekeep_active_key_" + k.id);
+      const latest = sessionStorage.getItem("gatekeep_latest_key");
+      const latestPrefix = sessionStorage.getItem("gatekeep_latest_key_prefix");
+
+      if (cached) {
+        setSelectedApiKey(cached);
+        setKeyWarning(null);
+        return;
+      }
+      if (latest && latestPrefix === k.prefix) {
+        setSelectedApiKey(latest);
+        setKeyWarning(null);
+        return;
+      }
+    }
+
+    if (activeWorkspace?.id.startsWith("ws_demo")) {
+      setSelectedApiKey("gw_live_demo_recruiter_key_instant10s");
+      setKeyWarning(null);
+      return;
+    }
+
+    setSelectedApiKey(k.prefix);
+    setKeyWarning(`GateKeep securely stores only SHA-256 hashes of API keys. Key "${k.name}" (${k.prefix}) requires its full plaintext value. Paste the full key or create a new key in Keys.`);
+  };
 
   const handleSendPayload = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -105,8 +149,8 @@ export default function AttackPlaygroundPage() {
 
     const payload = {
       model,
+      ...(provider.trim() ? { provider: provider.trim() } : {}),
       messages: [{ role: "user", content: promptText }],
-      temperature: 0.7,
     };
 
     try {
@@ -212,7 +256,7 @@ export default function AttackPlaygroundPage() {
                         key={k.id}
                         type="button"
                         disabled={k.is_revoked}
-                        onClick={() => setSelectedApiKey(k.prefix)}
+                        onClick={() => handleSelectKey(k)}
                         className="text-[10px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 hover:border-emerald-500 disabled:opacity-40 transition-colors"
                       >
                         {k.name}
@@ -220,9 +264,18 @@ export default function AttackPlaygroundPage() {
                     ))}
                   </div>
                 )}
+                {keyWarning && (
+                  <div className="mt-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[11px] leading-tight">
+                    {keyWarning}
+                  </div>
+                )}
               </div>
 
               {/* Target Model */}
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">Provider alias (optional)</label>
+                <input type="text" value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="Uses workspace policy when empty" className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-slate-200" />
+              </div>
               <div>
                 <label className="text-xs font-semibold text-slate-300 block mb-1">Target Model</label>
                 <input

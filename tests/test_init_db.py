@@ -1,6 +1,5 @@
 import boto3
 from moto import mock_aws
-import pytest
 
 from scripts.init_db import init_dynamodb_table
 
