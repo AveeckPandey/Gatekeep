@@ -1,4 +1,18 @@
-export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ||
+  (process.env.NODE_ENV === "development" ? "http://127.0.0.1:8000" : "");
+
+function requireApiBaseUrl(): string {
+  if (!API_BASE_URL) {
+    throw new Error("Backend API URL is not configured. Set NEXT_PUBLIC_API_URL to the public HTTPS backend address.");
+  }
+  if (process.env.NODE_ENV === "production") {
+    const url = new URL(API_BASE_URL);
+    if (url.protocol !== "https:" || ["localhost", "127.0.0.1", "::1"].includes(url.hostname)) {
+      throw new Error("NEXT_PUBLIC_API_URL must be a public HTTPS backend address in production.");
+    }
+  }
+  return API_BASE_URL;
+}
 
 export interface User {
   id: string;
@@ -129,7 +143,7 @@ async function request<T>(
   options: RequestInit = {},
   token?: string
 ): Promise<T> {
-  const url = `${API_BASE_URL}${endpoint}`;
+  const url = `${requireApiBaseUrl()}${endpoint}`;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
@@ -223,7 +237,7 @@ export const api = {
 
   // Data Plane Proxy Playground
   proxyChatCompletion: async (apiKey: string, payload: unknown) => {
-    const url = `${API_BASE_URL}/v1/chat/completions`;
+    const url = `${requireApiBaseUrl()}/v1/chat/completions`;
     const response = await fetch(url, {
       method: "POST",
       headers: {
