@@ -77,6 +77,7 @@ REPO_DIR="$(dirname "${SCRIPT_DIR}")"
 
 if [ -d "${REPO_DIR}/app" ]; then
     cp -r "${REPO_DIR}/app" "${APP_DIR}/"
+    cp -r "${REPO_DIR}/scripts" "${APP_DIR}/"
     cp "${REPO_DIR}/requirements.txt" "${APP_DIR}/"
     if [ -f "${REPO_DIR}/handler.py" ]; then
         cp "${REPO_DIR}/handler.py" "${APP_DIR}/"
@@ -104,37 +105,8 @@ echo -e "\n${YELLOW}[4/8] Configuring secure environment in ${CONFIG_DIR}...${NC
 mkdir -p "${CONFIG_DIR}"
 
 if [ ! -f "${CONFIG_DIR}/aegisgate.env" ]; then
-    echo -e "${GREEN}Generating fresh secrets for ${CONFIG_DIR}/aegisgate.env...${NC}"
-    JWT_SECRET="$(python3 -c "import secrets; print(secrets.token_hex(32))")"
-    FERNET_KEY="$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")"
-
-    cat <<EOF > "${CONFIG_DIR}/aegisgate.env"
-# GateKeep Production Configuration
-ENV=production
-APP_NAME=GateKeep
-DEBUG=false
-
-# Single-Table DynamoDB (Uses EC2 IAM Instance Profile)
-REPOSITORY_BACKEND=dynamodb
-DYNAMODB_TABLE_NAME=gatekeep-main
-AWS_REGION=us-east-1
-
-# Control Plane JWT
-JWT_SECRET_KEY=${JWT_SECRET}
-JWT_ALGORITHM=HS256
-JWT_EXPIRE_MINUTES=1440
-
-# Upstream LLM Key Encryption (Fernet AES-128-CBC + HMAC-SHA256)
-GATEKEEP_ENCRYPTION_KEY=${FERNET_KEY}
-
-# Upstream Default
-DEFAULT_UPSTREAM_BASE_URL=https://integrate.api.nvidia.com/v1
-
-# Security Thresholds
-ENTROPY_THRESHOLD=3.7
-MIN_ENTROPY_STRING_LEN=16
-EOF
-    echo -e "${GREEN}Created ${CONFIG_DIR}/aegisgate.env with cryptographically random secrets.${NC}"
+    echo -e "${RED}[ERROR] ${CONFIG_DIR}/aegisgate.env is required before service setup.${NC}"
+    exit 1
 fi
 
 # Strict file permissions on secrets
@@ -165,7 +137,7 @@ fi
 # 5.5. Initialize DynamoDB Table
 # ------------------------------------------------------------------------------
 echo -e "\n${YELLOW}[5.5/8] Verifying and initializing DynamoDB table schema...${NC}"
-su - "${USER_NAME}" -c "${APP_DIR}/venv/bin/python ${APP_DIR}/scripts/init_db.py" || true
+runuser -u "${USER_NAME}" -- "${APP_DIR}/venv/bin/python" "${APP_DIR}/scripts/init_db.py"
 
 # ------------------------------------------------------------------------------
 # 6. Hardened Nginx Reverse Proxy Setup

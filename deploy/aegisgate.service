@@ -10,7 +10,7 @@ User=aegisgate
 Group=aegisgate
 WorkingDirectory=/opt/aegisgate
 EnvironmentFile=/etc/aegisgate/aegisgate.env
-ExecStart=/opt/aegisgate/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 2
+ExecStart=/opt/aegisgate/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 Restart=always
 RestartSec=5s
 

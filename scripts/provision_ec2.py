@@ -9,11 +9,10 @@ Provisions:
 
 import argparse
 import json
-import time
 import urllib.request
+
 import boto3
 from botocore.exceptions import ClientError
-
 
 ROLE_NAME = "aegisgate-ec2-role"
 INSTANCE_PROFILE_NAME = "aegisgate-ec2-profile"
@@ -38,6 +37,7 @@ def setup_iam_instance_profile(region: str = "us-east-1") -> str:
 
     table_arn = f"arn:aws:dynamodb:{region}:{account_id}:table/{TABLE_NAME}"
     index_arn = f"{table_arn}/index/*"
+    config_parameter_arn = f"arn:aws:ssm:{region}:{account_id}:parameter/gatekeep/production/env"
 
     trust_policy = {
         "Version": "2012-10-17",
@@ -83,6 +83,12 @@ def setup_iam_instance_profile(region: str = "us-east-1") -> str:
                 "Resource": [table_arn, index_arn],
             },
             {
+                "Sid": "ReadGateKeepEnvironment",
+                "Effect": "Allow",
+                "Action": ["ssm:GetParameter"],
+                "Resource": config_parameter_arn,
+            },
+            {
                 "Sid": "AWSSSMManagedInstanceAccess",
                 "Effect": "Allow",
                 "Action": [
@@ -103,6 +109,10 @@ def setup_iam_instance_profile(region: str = "us-east-1") -> str:
         PolicyDocument=json.dumps(policy_doc),
     )
     print("Attached least-privilege DynamoDB & SSM policy to role.")
+    iam.attach_role_policy(
+        RoleName=ROLE_NAME,
+        PolicyArn="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+    )
 
     # Create Instance Profile
     print(f"Configuring IAM Instance Profile '{INSTANCE_PROFILE_NAME}'...")
@@ -241,7 +251,7 @@ def launch_hardened_ec2(
 ):
     """Provisions infrastructure and optionally launches hardened EC2 instance."""
     print("=" * 70)
-    print(" Provisioning GateKeep Hardened AWS EC2 Infrastructure ($0 Free Tier)")
+    print(" Provisioning GateKeep Hardened AWS EC2 Infrastructure")
     print("=" * 70)
 
     # 0. Ensure DynamoDB table is initialized
@@ -291,14 +301,14 @@ def launch_hardened_ec2(
     print(f" IAM Instance Profile: {profile_name}")
     print(f" Security Group ID:    {sg_id}")
     print(f" Recommended AMI:      {ami_id}")
-    print(f" Free Tier Instance:   {instance_type} (Ubuntu 24.04 LTS)")
+    print(f" Instance Type:        {instance_type} (Ubuntu 24.04 LTS)")
     print("\n Instructions to Launch / Attach to Existing Instance:")
     print(" 1. When launching your EC2 instance:")
     print(f"    - Attach Security Group:  {sg_id}")
     print(f"    - Attach IAM Profile:     {profile_name}")
     print("    - Enable IMDSv2:          HttpTokens=required (Metadata version 2)")
     print(" 2. Once connected via SSH or AWS SSM Session Manager:")
-    print("    git clone https://github.com/gatekeep/gatekeep.git /tmp/gatekeep")
+    print("    git clone https://github.com/AveeckPandey/Gatekeep.git /tmp/gatekeep")
     print("    cd /tmp/gatekeep && sudo bash deploy/setup_ec2.sh")
     print("=" * 70 + "\n")
 
