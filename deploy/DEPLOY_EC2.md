@@ -1,6 +1,6 @@
-# Hardened AWS EC2 Deployment Runbook — GateKeep ($0/month Free Tier)
+# Hardened AWS EC2 Deployment Runbook — GateKeep
 
-This runbook guides you through deploying GateKeep on an **AWS EC2 Free Tier instance** (Ubuntu 24.04 / 22.04 LTS on `t2.micro` or `t3.micro`) with enterprise-grade host and network hardening.
+This runbook guides you through deploying GateKeep on an Ubuntu EC2 instance (`t2.micro` or `t3.micro`) with host and network hardening. EC2, storage, and the public IPv4 address may incur charges depending on your AWS account.
 
 ---
 
@@ -18,10 +18,12 @@ Once your EC2 instance is launched and connected:
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/gatekeep/gatekeep.git /tmp/gatekeep
+git clone https://github.com/AveeckPandey/Gatekeep.git /tmp/gatekeep
 cd /tmp/gatekeep
 
-# 2. Run automated hardening script as root
+# 2. Provision /etc/aegisgate/aegisgate.env with production values,
+#    including AUTH_BACKEND=cognito and the Cognito pool/client IDs.
+# 3. Run automated hardening script as root
 sudo bash deploy/setup_ec2.sh
 ```
 
@@ -182,11 +184,23 @@ sudo systemctl reload ssh || sudo systemctl reload sshd
 ---
 
 ### Step 3.10: Obtain Let's Encrypt TLS Certificate (Certbot)
-Point your DNS `A` record (e.g. `api.yourdomain.com`) to your EC2 Elastic/Public IP, then run:
+Point your DNS `A` record to the EC2 Elastic IP. Replace `api.yourdomain.com` with your API hostname, then run:
 ```bash
-sudo certbot --nginx -d api.yourdomain.com
+sudo sed -i 's/server_name _;/server_name api.yourdomain.com;/' /etc/nginx/sites-available/aegisgate.conf
+sudo nginx -t && sudo systemctl reload nginx
+sudo certbot certonly --webroot -w /var/www/html -d api.yourdomain.com \
+  --non-interactive --agree-tos --register-unsafely-without-email
+sudo sed -i \
+  -e 's|/etc/ssl/certs/ssl-cert-snakeoil.pem|/etc/letsencrypt/live/api.yourdomain.com/fullchain.pem|' \
+  -e 's|/etc/ssl/private/ssl-cert-snakeoil.key|/etc/letsencrypt/live/api.yourdomain.com/privkey.pem|' \
+  /etc/nginx/sites-available/aegisgate.conf
+sudo nginx -t && sudo systemctl reload nginx
+sudo install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
+printf '#!/bin/sh\nset -e\nnginx -t\nsystemctl reload nginx\n' | \
+  sudo tee /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh >/dev/null
+sudo chmod 755 /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
 ```
-Certbot automatically provisions auto-renewing TLS certificates and binds them to Nginx.
+The Certbot timer renews the certificate; the deploy hook reloads Nginx when it changes.
 
 ---
 
