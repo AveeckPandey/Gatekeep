@@ -113,7 +113,11 @@ async def login(
                 user = await repo.create_user(User(id=claims["sub"], email=payload.email, hashed_password=""))
             return TokenResponse(access_token=token, user=UserResponse(id=user.id, email=user.email, created_at=user.created_at))
         except ClientError as exc:
-            raise HTTPException(status_code=401, detail=exc.response["Error"]["Code"]) from exc
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            ) from exc
     now = time.time()
     email_key = payload.email.lower()
 

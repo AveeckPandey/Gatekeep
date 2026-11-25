@@ -2,10 +2,14 @@
 
 import jwt
 import pytest
+from botocore.exceptions import ClientError
 from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi import HTTPException
 
 from app.config import settings
 from app.core import cognito
+from app.models.user import UserLoginRequest
+from app.routes import auth
 
 
 def test_cognito_token_claims(monkeypatch):
@@ -28,3 +32,19 @@ def test_cognito_token_claims(monkeypatch):
         cognito.verify_cognito_access_token(token(token_use="id"))
     with pytest.raises(jwt.InvalidTokenError):
         cognito.verify_cognito_access_token(token(iss="https://attacker.example"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_code", ["UserNotFoundException", "NotAuthorizedException"])
+async def test_cognito_login_does_not_reveal_account_existence(monkeypatch, error_code):
+    monkeypatch.setattr(settings, "AUTH_BACKEND", "cognito")
+
+    async def reject_login(_email, _password):
+        raise ClientError({"Error": {"Code": error_code, "Message": "Rejected"}}, "InitiateAuth")
+
+    monkeypatch.setattr(cognito, "authenticate", reject_login)
+    with pytest.raises(HTTPException) as result:
+        await auth.login(UserLoginRequest(email="unknown@example.com", password="invalid"), repo=None)
+
+    assert result.value.status_code == 401
+    assert result.value.detail == "Invalid email or password"
