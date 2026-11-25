@@ -12,6 +12,8 @@ import {
   Copy,
   Check,
   Key,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { Header } from "@/components/Header";
 import { useAuth } from "@/context/AuthContext";
@@ -62,6 +64,8 @@ export default function AttackPlaygroundPage() {
   const { activeWorkspace } = useWorkspace();
 
   const [keys, setKeys] = useState<ApiKey[]>([]);
+  const [selectedKeyId, setSelectedKeyId] = useState("");
+  const [showGatewayKey, setShowGatewayKey] = useState(false);
   const [selectedApiKey, setSelectedApiKey] = useState<string>(() => {
     if (typeof window !== "undefined") {
       return localStorage.getItem("gatekeep_demo_key") || "";
@@ -87,18 +91,20 @@ export default function AttackPlaygroundPage() {
       .then((kList) => {
         if (!isMounted) return;
         setKeys(kList);
-        const cachedLatest = typeof window !== "undefined" ? sessionStorage.getItem("gatekeep_latest_key") : null;
-        if (cachedLatest) {
-          setSelectedApiKey((prev) => prev || cachedLatest);
+        const latest = sessionStorage.getItem("gatekeep_latest_key");
+        const latestPrefix = sessionStorage.getItem("gatekeep_latest_key_prefix");
+        const matchingKey = kList.find((k) => !k.is_revoked && k.prefix === latestPrefix);
+        if (matchingKey && latest && /^gw_live_[A-Za-z0-9]{32}$/.test(latest)) {
+          setSelectedKeyId(matchingKey.id);
+          setSelectedApiKey(latest);
+          setKeyWarning(null);
         } else if (activeWorkspace.id.startsWith("ws_demo")) {
-          const demoKey = (typeof window !== "undefined" && sessionStorage.getItem("gatekeep_demo_key")) || "gw_live_demo_recruiter_key_instant10s";
-          setSelectedApiKey((prev) => prev || demoKey);
+          const demoKey = localStorage.getItem("gatekeep_demo_key");
+          setSelectedApiKey(demoKey || "");
+          setSelectedKeyId("");
         } else {
-          const active = kList.find((k) => !k.is_revoked);
-          if (active) {
-            setSelectedApiKey((prev) => prev || active.prefix);
-            setKeyWarning(`Selected prefix "${active.prefix}". Paste your saved full plaintext key to execute.`);
-          }
+          setSelectedApiKey("");
+          setSelectedKeyId("");
         }
       })
       .catch((err: unknown) => {
@@ -111,37 +117,27 @@ export default function AttackPlaygroundPage() {
   }, [token, activeWorkspace]);
 
   const handleSelectKey = (k: ApiKey) => {
-    if (typeof window !== "undefined") {
-      const cached = sessionStorage.getItem("gatekeep_active_key_" + k.id);
-      const latest = sessionStorage.getItem("gatekeep_latest_key");
-      const latestPrefix = sessionStorage.getItem("gatekeep_latest_key_prefix");
+    setSelectedKeyId(k.id);
+    const latest = sessionStorage.getItem("gatekeep_latest_key");
+    const latestPrefix = sessionStorage.getItem("gatekeep_latest_key_prefix");
+    const cached = sessionStorage.getItem("gatekeep_active_key_" + k.id) ||
+      (latestPrefix === k.prefix ? latest : null) ||
+      (activeWorkspace?.id.startsWith("ws_demo") ? localStorage.getItem("gatekeep_demo_key") : null);
 
-      if (cached) {
-        setSelectedApiKey(cached);
-        setKeyWarning(null);
-        return;
-      }
-      if (latest && latestPrefix === k.prefix) {
-        setSelectedApiKey(latest);
-        setKeyWarning(null);
-        return;
-      }
-    }
-
-    if (activeWorkspace?.id.startsWith("ws_demo")) {
-      setSelectedApiKey("gw_live_demo_recruiter_key_instant10s");
+    if (cached && /^gw_live_[A-Za-z0-9]{32}$/.test(cached)) {
+      setSelectedApiKey(cached);
       setKeyWarning(null);
       return;
     }
 
-    setSelectedApiKey(k.prefix);
-    setKeyWarning(`GateKeep securely stores only SHA-256 hashes of API keys. Key "${k.name}" (${k.prefix}) requires its full plaintext value. Paste the full key or create a new key in Keys.`);
+    setSelectedApiKey("");
+    setKeyWarning(`Only the prefix ${k.prefix} is stored. Paste the full key you saved when it was created, or create a new key.`);
   };
 
   const handleSendPayload = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedApiKey.trim()) {
-      alert("Please enter or select a Gateway API Key (e.g. gw_live_...).");
+    if (!/^gw_live_[A-Za-z0-9]{32}$/.test(selectedApiKey.trim())) {
+      setKeyWarning("Enter a complete GateKeep gateway key. A provider API key or shortened prefix will not work here.");
       return;
     }
 
@@ -248,30 +244,49 @@ export default function AttackPlaygroundPage() {
                 <div className="relative">
                   <Key className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
                   <input
-                    type="text"
-                    required
+                    type={showGatewayKey ? "text" : "password"}
                     placeholder="gw_live_..."
                     value={selectedApiKey}
-                    onChange={(e) => setSelectedApiKey(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-2 text-xs font-mono text-slate-200 focus:outline-none focus:border-emerald-500"
+                    onChange={(e) => {
+                      setSelectedApiKey(e.target.value);
+                      setSelectedKeyId("");
+                      setKeyWarning(null);
+                    }}
+                    autoComplete="off"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-10 py-2 text-xs font-mono text-slate-200 focus:outline-none focus:border-emerald-500"
                   />
+                  <button
+                    type="button"
+                    onClick={() => setShowGatewayKey((shown) => !shown)}
+                    aria-label={showGatewayKey ? "Hide gateway key" : "Show gateway key"}
+                    className="absolute right-3 top-2.5 text-slate-500 hover:text-slate-300"
+                  >
+                    {showGatewayKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
-                {keys.length > 0 && (
-                  <div className="flex gap-1.5 flex-wrap mt-2">
-                    <span className="text-[10px] text-slate-500 py-0.5">Quick select:</span>
-                    {keys.map((k) => (
-                      <button
-                        key={k.id}
-                        type="button"
-                        disabled={k.is_revoked}
-                        onClick={() => handleSelectKey(k)}
-                        className="text-[10px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 hover:border-emerald-500 disabled:opacity-40 transition-colors"
-                      >
-                        {k.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
+                <label htmlFor="saved-gateway-key" className="text-[11px] text-slate-400 block mt-2 mb-1">
+                  Saved gateway keys
+                </label>
+                <select
+                  id="saved-gateway-key"
+                  value={selectedKeyId}
+                  onChange={(e) => {
+                    const key = keys.find((item) => item.id === e.target.value);
+                    if (key) handleSelectKey(key);
+                    else {
+                      setSelectedKeyId("");
+                      setSelectedApiKey("");
+                      setKeyWarning(null);
+                    }
+                  }}
+                  disabled={!keys.some((k) => !k.is_revoked)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-slate-200 focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+                >
+                  <option value="">{keys.some((k) => !k.is_revoked) ? "Choose a gateway key" : "No active gateway keys"}</option>
+                  {keys.filter((k) => !k.is_revoked).map((k) => (
+                    <option key={k.id} value={k.id}>{k.prefix}</option>
+                  ))}
+                </select>
                 {keyWarning && (
                   <div className="mt-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[11px] leading-tight">
                     {keyWarning}
