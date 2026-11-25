@@ -5,7 +5,7 @@ const steps = [
   {
     number: "01",
     title: "Connect a provider",
-    text: "In a workspace, set an OpenAI compatible chat completions URL and its provider API key. GateKeep encrypts that key at rest.",
+    text: "In a workspace, set a compatible chat completions base URL (with Bearer auth) for any AI model and its provider API key. Other API formats require dedicated adapters. GateKeep encrypts that key at rest.",
   },
   {
     number: "02",
@@ -15,12 +15,12 @@ const steps = [
   {
     number: "03",
     title: "Inspect and forward",
-    text: "GateKeep checks prompts for sensitive data and prompt injection. Your policy decides whether to block, redact, or allow a request before it reaches the model.",
+    text: "GateKeep checks supported text and tool fields using deterministic regex, Luhn, entropy, and heuristic injection rules, then blocks, redacts, or allows requests according to your policy.",
   },
   {
     number: "04",
     title: "Review the result",
-    text: "When enabled, response inspection checks model output for sensitive data. The gateway returns a verdict and records an audit entry.",
+    text: "When enabled, response inspection checks model text and streamed tool arguments for matching secrets or PII. The gateway returns a verdict and records one audit entry.",
   },
 ];
 
@@ -41,10 +41,10 @@ export default function OverviewPage() {
         <section className="py-14 md:py-20">
           <p className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-400">Product overview</p>
           <h1 className="mt-4 max-w-4xl text-3xl font-bold leading-tight md:text-5xl">
-            See what reaches your AI model. Stop unsafe requests before they get there.
+            Inspect what reaches your AI model with deterministic gateway rules.
           </h1>
           <p className="mt-6 max-w-3xl text-sm leading-7 text-slate-300 md:text-base">
-            GateKeep sits between your application and a compatible AI provider. It authenticates each request, inspects the prompt, applies your firewall policy, forwards permitted traffic, and gives you a record of what happened.
+            GateKeep sits between your application and a compatible <code className="font-mono text-slate-200">/chat/completions</code> provider. It authenticates each request, checks supported text fields against regex, Luhn, entropy, and heuristic injection rules, applies your policy, forwards permitted traffic, and records the outcome.
           </p>
           <Link href="/register" className="mt-8 inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-5 py-3 text-sm font-bold text-slate-950 hover:bg-emerald-400">
             Set up a workspace <ArrowRight className="h-4 w-4" />
@@ -83,7 +83,31 @@ export default function OverviewPage() {
             <div className="rounded-xl border border-slate-800 p-5">
               <ShieldCheck className="h-6 w-6 text-emerald-400" />
               <h3 className="mt-3 text-sm font-semibold">Review activity</h3>
-              <p className="mt-2 text-xs leading-5 text-slate-400">See allowed, redacted, and blocked requests in the audit log, with findings and inspection timing.</p>
+              <p className="mt-2 text-xs leading-5 text-slate-400">See allowed, redacted, blocked, and error outcomes in the audit log, with findings and inspection timing.</p>
+            </div>
+          </div>
+        </section>
+
+        <section aria-labelledby="scope-and-limits" className="border-t border-slate-800 py-10">
+          <h2 id="scope-and-limits" className="text-xl font-bold">Protection scope and model compatibility</h2>
+          <div className="mt-6 grid gap-4 md:grid-cols-2">
+            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5">
+              <h3 className="text-sm font-semibold text-emerald-400">What is inspected (and known limits)</h3>
+              <p className="mt-2 text-xs leading-6 text-slate-300">
+                GateKeep uses deterministic pattern matching rather than an LLM classifier. It inspects text strings, <code className="font-mono">type: &quot;text&quot;</code> content parts, tool definitions, tool arguments, and compatible SSE streams for email addresses, Luhn-valid credit cards (13–19 digits), AWS/OpenAI/GitHub key patterns, unbroken high-entropy tokens (&ge;16 chars), and literal English prompt-injection phrases.
+              </p>
+              <p className="mt-2 text-xs leading-6 text-slate-400">
+                Limitations: unlisted PII (such as phone numbers or SSNs) and obfuscated or encoded injections are not caught by these rules, and benign or educational text quoting an attack phrase literally can trigger a match. Unsupported non-text media (images, audio, files) is rejected rather than passed uninspected.
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5">
+              <h3 className="text-sm font-semibold text-emerald-400">Supported AI model endpoints</h3>
+              <p className="mt-2 text-xs leading-6 text-slate-300">
+                Upstream providers must expose a compatible <code className="font-mono">/chat/completions</code> endpoint using <code className="font-mono">Authorization: Bearer</code> authentication (such as compatible chat-completions endpoints for Gemini, Claude, NVIDIA NIM, or self-hosted gateways).
+              </p>
+              <p className="mt-2 text-xs leading-6 text-slate-400">
+                Native-only provider endpoints (non-compatible Gemini/Anthropic schemas, image generation, embeddings, or audio APIs) require dedicated adapters and are not handled by <code className="font-mono">/v1/chat/completions</code>.
+              </p>
             </div>
           </div>
         </section>

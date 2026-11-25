@@ -17,6 +17,39 @@ import { useAuth } from "@/context/AuthContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
 import { api, ApiKey, ApiKeyCreateResponse } from "@/lib/api";
 
+const CREDENTIAL_PREFIXES_LOWER = [
+  "gw_live_",
+  "nvapi-",
+  "sk-",
+  "pk_live_",
+  "pk_test_",
+  "rk_live_",
+  "rk_test_",
+  "ghp_",
+  "gho_",
+  "ghu_",
+  "ghs_",
+  "ghr_",
+  "github_pat_",
+  "xoxb-",
+  "xoxp_",
+  "bearer ",
+];
+const EXACT_CREDENTIAL_PREFIXES = ["AIza", "AKIA", "ABIA", "ACCA", "ASIA"];
+
+function looksLikeCredential(label: string): boolean {
+  const trimmed = label.trim();
+  if (!trimmed) return false;
+  const lower = trimmed.toLowerCase();
+  if (
+    CREDENTIAL_PREFIXES_LOWER.some((prefix) => lower.startsWith(prefix)) ||
+    EXACT_CREDENTIAL_PREFIXES.some((prefix) => trimmed.startsWith(prefix))
+  ) {
+    return true;
+  }
+  return trimmed.split(/\s+/).some((tok) => tok.length >= 40 || /^[0-9a-fA-F]{24,}$/.test(tok));
+}
+
 export default function ApiKeysPage() {
   const { token } = useAuth();
   const { activeWorkspace } = useWorkspace();
@@ -94,7 +127,7 @@ export default function ApiKeysPage() {
   const handleCreateKey = async (e: React.FormEvent) => {
     e.preventDefault();
     const label = newKeyName.trim();
-    if (label.length >= 40 && !/\s/.test(label)) {
+    if (looksLikeCredential(label)) {
       setErrorMessage("This looks like an API credential. Use a short label here and enter provider keys under Firewall Policies.");
       return;
     }
@@ -175,25 +208,32 @@ export default function ApiKeysPage() {
             <h3 className="text-sm font-bold text-slate-100">Create Gateway API Key</h3>
           </div>
           <p className="text-xs text-slate-400 mb-4">
-            Gateway keys (<code className="font-mono text-slate-300">gw_live_...</code>) are hashed with SHA-256 at rest. The name is only a label; enter provider credentials under Firewall Policies, never as a key name. A full gateway key remains viewable only in the browser session where it was created.
+            Gateway keys (<code className="font-mono text-slate-300">gw_live_...</code>) are hashed with SHA-256 at rest. Enter only a short human-readable label below—never paste a provider key, secret token, or gateway key into the label field (provider credentials belong in <Link href="/dashboard/policies" className="text-emerald-400 hover:underline">Firewall Policies</Link>). A full gateway key remains viewable only in the browser session where it was created.
           </p>
 
-          <form onSubmit={handleCreateKey} className="flex flex-col sm:flex-row gap-3">
-            <input
-              type="text"
-              placeholder="Key name (optional, e.g. Production Service)"
-              value={newKeyName}
-              onChange={(e) => setNewKeyName(e.target.value)}
-              className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-emerald-500"
-            />
-            <button
-              type="submit"
-              disabled={isCreating}
-              className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-50 shrink-0"
-            >
-              <Plus className="w-4 h-4" />
-              <span>{isCreating ? "Generating Key..." : "Create Live Key"}</span>
-            </button>
+          <form onSubmit={handleCreateKey} className="space-y-2">
+            <label htmlFor="gateway-key-label" className="text-[11px] font-semibold text-slate-300 block">
+              Key Label (not a secret or API key)
+            </label>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <input
+                id="gateway-key-label"
+                type="text"
+                maxLength={100}
+                placeholder="Label only, e.g. Production Service (optional)"
+                value={newKeyName}
+                onChange={(e) => setNewKeyName(e.target.value)}
+                className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-emerald-500"
+              />
+              <button
+                type="submit"
+                disabled={isCreating}
+                className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-50 shrink-0"
+              >
+                <Plus className="w-4 h-4" />
+                <span>{isCreating ? "Generating Key..." : "Create Live Key"}</span>
+              </button>
+            </div>
           </form>
         </div>
 

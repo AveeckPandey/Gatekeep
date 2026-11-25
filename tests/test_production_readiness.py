@@ -137,6 +137,243 @@ async def test_live_upstream_streaming_with_response_dlp(async_client: AsyncClie
     assert logs[0].findings_count >= 2
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("split_pos", [1, 4, 10, 15, 19])
+@respx.mock
+async def test_streaming_secret_split_across_chunks_redacted(
+    async_client: AsyncClient, split_pos: int
+):
+    """Verify secrets split across chunk boundaries at any position are buffered and redacted."""
+    ws_id, api_key, _ = await _setup_tenant(async_client, mode=PolicyMode.REDACT)
+
+    aws_secret = "AKIAIOSFODNN7EXAMPLE"
+    part1 = aws_secret[:split_pos]
+    part2 = aws_secret[split_pos:]
+    email = "split.leak@corporate.org"
+    email_p1, email_p2 = email[:7], email[7:]
+    long_prefix = "Clean text word. " * 20  # > 300 chars to exercise lookback flush boundary
+
+    sse_payload = (
+        f"data: {json.dumps({'id': 'chatcmpl-split', 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': long_prefix + 'Key: ' + part1}}]})}\n\n"
+        f"data: {json.dumps({'id': 'chatcmpl-split', 'choices': [{'index': 0, 'delta': {'content': part2 + ' email: ' + email_p1}}]})}\n\n"
+        f"data: {json.dumps({'id': 'chatcmpl-split', 'choices': [{'index': 0, 'delta': {'content': email_p2 + '.'}, 'finish_reason': 'stop'}]})}\n\n"
+        "data: [DONE]\n\n"
+    )
+
+    respx.post("https://integrate.api.nvidia.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            content=sse_payload.encode("utf-8"),
+            headers={"Content-Type": "text/event-stream"},
+        )
+    )
+
+    resp = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": "nvidia/nemotron-4-340b-instruct",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert aws_secret not in resp.text
+    assert email not in resp.text
+    assert "[REDACTED_AWS_KEY]" in resp.text
+    assert "[REDACTED_EMAIL]" in resp.text
+
+    logs = await repo.list_audit_logs_for_workspace(ws_id)
+    assert len(logs) == 1
+    assert logs[0].action == "REDACT"
+    assert logs[0].findings_count >= 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_streaming_tool_calls_arguments_split_across_chunks_redacted(
+    async_client: AsyncClient,
+):
+    """Verify streamed tool_calls and function_call arguments are buffered and redacted."""
+    ws_id, api_key, _ = await _setup_tenant(async_client, mode=PolicyMode.REDACT)
+
+    sse_payload = (
+        'data: {"id":"chatcmpl-tc","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"notify","arguments":"{\\"email\\":\\"le"}}]}}]}\n\n'
+        'data: {"id":"chatcmpl-tc","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ak@corp.com\\",\\"aws\\":\\"AKIA"}}]}}]}\n\n'
+        'data: {"id":"chatcmpl-tc","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"IOSFODNN7EXAMPLE\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    respx.post("https://integrate.api.nvidia.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            content=sse_payload.encode("utf-8"),
+            headers={"Content-Type": "text/event-stream"},
+        )
+    )
+
+    resp = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": "nvidia/nemotron-4-340b-instruct",
+            "messages": [{"role": "user", "content": "Call tool"}],
+            "stream": True,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert "leak@corp.com" not in resp.text
+    assert "AKIAIOSFODNN7EXAMPLE" not in resp.text
+    assert "[REDACTED_EMAIL]" in resp.text
+    assert "[REDACTED_AWS_KEY]" in resp.text
+
+    logs = await repo.list_audit_logs_for_workspace(ws_id)
+    assert len(logs) == 1
+    assert logs[0].action == "REDACT"
+    assert logs[0].findings_count >= 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_streaming_allow_mode_detects_split_secret_without_redacting(
+    async_client: AsyncClient,
+):
+    """Verify ALLOW mode streaming still detects split secrets in audit logs while preserving text."""
+    ws_id, api_key, _ = await _setup_tenant(async_client, mode=PolicyMode.ALLOW)
+
+    sse_payload = (
+        'data: {"id":"chatcmpl-allow-s","choices":[{"index":0,"delta":{"content":"Key: AKIAIOSF"}}]}\n\n'
+        'data: {"id":"chatcmpl-allow-s","choices":[{"index":0,"delta":{"content":"ODNN7EXAMPLE"},"finish_reason":"stop"}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    respx.post("https://integrate.api.nvidia.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            content=sse_payload.encode("utf-8"),
+            headers={"Content-Type": "text/event-stream"},
+        )
+    )
+
+    resp = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": "nvidia/nemotron-4-340b-instruct",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert "AKIAIOSFODNN7EXAMPLE" in resp.text
+
+    logs = await repo.list_audit_logs_for_workspace(ws_id)
+    assert len(logs) == 1
+    assert logs[0].action == "ALLOW"
+    assert logs[0].findings_count >= 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_streaming_function_call_arguments_split_redacted(async_client: AsyncClient):
+    """Verify legacy delta.function_call.arguments split across chunks is buffered and redacted."""
+    ws_id, api_key, _ = await _setup_tenant(async_client, mode=PolicyMode.REDACT)
+
+    sse_payload = (
+        'data: {"id":"chatcmpl-fc","choices":[{"index":0,"delta":{"role":"assistant","function_call":{"name":"send_mail","arguments":"{\\"to\\":\\"al"}}}]}\n\n'
+        'data: {"id":"chatcmpl-fc","choices":[{"index":0,"delta":{"function_call":{"arguments":"ice@corp.com\\"}"}},"finish_reason":"function_call"}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    respx.post("https://integrate.api.nvidia.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            content=sse_payload.encode("utf-8"),
+            headers={"Content-Type": "text/event-stream"},
+        )
+    )
+
+    resp = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": "nvidia/nemotron-4-340b-instruct",
+            "messages": [{"role": "user", "content": "Call fn"}],
+            "stream": True,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert "alice@corp.com" not in resp.text
+    assert "[REDACTED_EMAIL]" in resp.text
+
+    logs = await repo.list_audit_logs_for_workspace(ws_id)
+    assert len(logs) == 1
+    assert logs[0].action == "REDACT"
+    assert logs[0].findings_count >= 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_streaming_upstream_error_returns_upstream_status_and_single_audit_log(
+    async_client: AsyncClient,
+):
+    """Verify upstream errors on stream=True return actual HTTP error status and ONE ERROR log."""
+    ws_id, api_key, _ = await _setup_tenant(async_client, mode=PolicyMode.REDACT)
+
+    respx.post("https://integrate.api.nvidia.com/v1/chat/completions").mock(
+        return_value=httpx.Response(502, json={"error": {"message": "Bad upstream gateway"}})
+    )
+
+    resp = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": "nvidia/nemotron-4-340b-instruct",
+            "messages": [{"role": "user", "content": "Trigger stream error"}],
+            "stream": True,
+        },
+    )
+
+    assert resp.status_code == 502
+    assert resp.json() == {"error": {"message": "Bad upstream gateway"}}
+
+    logs = await repo.list_audit_logs_for_workspace(ws_id)
+    assert len(logs) == 1
+    assert logs[0].action == "ERROR"
+    assert "Upstream returned HTTP 502" in (logs[0].block_reason or "")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_streaming_upstream_connect_error_returns_502_and_single_audit_log(
+    async_client: AsyncClient,
+):
+    ws_id, api_key, _ = await _setup_tenant(async_client, mode=PolicyMode.REDACT)
+
+    respx.post("https://integrate.api.nvidia.com/v1/chat/completions").mock(
+        side_effect=httpx.ConnectError("Connection reset")
+    )
+
+    resp = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": "nvidia/nemotron-4-340b-instruct",
+            "messages": [{"role": "user", "content": "Trigger stream connect error"}],
+            "stream": True,
+        },
+    )
+
+    assert resp.status_code == 502
+    logs = await repo.list_audit_logs_for_workspace(ws_id)
+    assert len(logs) == 1
+    assert logs[0].action == "ERROR"
+
+
 # ==============================================================================
 # 2. Tool-Calling Request Support (Agentic Workflows)
 # ==============================================================================

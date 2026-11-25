@@ -171,6 +171,51 @@ async def test_workspace_api_key_lifecycle(async_client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_api_key_creation_rejects_credential_shaped_names(async_client: AsyncClient):
+    reg = await async_client.post(
+        "/api/auth/register",
+        json={"email": "keylabel@example.com", "password": "password1234"},
+    )
+    token = reg.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    ws = (
+        await async_client.post(
+            "/api/workspaces",
+            headers=headers,
+            json={"name": "Key Label WS"},
+        )
+    ).json()
+    ws_id = ws["id"]
+
+    bad_names = [
+        "sk-proj-abc123xyz45678901234567890",
+        "AKIAIOSFODNN7EXAMPLE",
+        "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+        "nvapi-1234567890abcdef1234567890",
+        "AIzaSyD1234567890abcdef1234567890",
+        "gw_live_1234567890abcdef1234567890abcdef",
+        "9b7d3f82a1c4e650d8f2b3a4c5e6f7a8",
+        "A" * 40,
+    ]
+    for bad_name in bad_names:
+        resp = await async_client.post(
+            f"/api/workspaces/{ws_id}/keys",
+            headers=headers,
+            json={"name": bad_name},
+        )
+        assert resp.status_code == 422, f"Credential-like name should be rejected: {bad_name}"
+
+    for valid_name in ("Production App Key", "production-backend-service"):
+        resp = await async_client.post(
+            f"/api/workspaces/{ws_id}/keys",
+            headers=headers,
+            json={"name": valid_name},
+        )
+        assert resp.status_code == 201, f"Valid label rejected: {valid_name}"
+
+
+@pytest.mark.asyncio
 async def test_recruiter_demo_session_provisioning(async_client: AsyncClient):
     """Verify frictionless 10-second recruiter demo session generation."""
     resp = await async_client.post("/api/auth/demo")

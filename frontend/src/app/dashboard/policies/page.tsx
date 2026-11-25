@@ -128,7 +128,7 @@ export default function PoliciesPage() {
               <h3 className="text-sm font-bold text-slate-100">Firewall Operation Mode</h3>
             </div>
             <p className="text-xs text-slate-400 mb-5">
-              Select how GateKeep handles requests containing detected PII, API tokens, or high-entropy secrets.
+              Select how GateKeep handles detected PII, API tokens, and high-entropy secrets. Note: when <strong>Prompt Injection &amp; Jailbreak Defense</strong> is enabled below, it takes precedence and blocks detected prompt injections with HTTP 403 across all modes (including <strong>ALLOW</strong>).
             </p>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -153,7 +153,7 @@ export default function PoliciesPage() {
                     />
                   </div>
                   <p className="text-[11px] leading-relaxed">
-                    Instantly drops requests containing any secret or PII and returns HTTP 403 Forbidden.
+                    Drops requests containing matched secrets or PII with HTTP 403. Prompt injections are blocked only if the injection toggle below is enabled.
                   </p>
                 </div>
               </label>
@@ -179,7 +179,7 @@ export default function PoliciesPage() {
                     />
                   </div>
                   <p className="text-[11px] leading-relaxed">
-                    Masks secrets and PII with <code className="text-amber-300 font-mono">[REDACTED_...]</code> and forwards the sanitized prompt.
+                    Masks matched secrets and PII with <code className="text-amber-300 font-mono">[REDACTED_...]</code> and forwards the sanitized prompt. Still blocks prompt injections if the toggle below is enabled.
                   </p>
                 </div>
               </label>
@@ -205,7 +205,7 @@ export default function PoliciesPage() {
                     />
                   </div>
                   <p className="text-[11px] leading-relaxed">
-                    Permits requests untouched. Logs all telemetry and matched findings to audit storage.
+                    Forwards secrets and PII untouched while logging findings. <strong>Still blocks prompt injections (HTTP 403)</strong> unless Prompt Injection Defense is disabled below.
                   </p>
                 </div>
               </label>
@@ -214,13 +214,13 @@ export default function PoliciesPage() {
 
           {/* Section 2: Prompt Injection Heuristics */}
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-lg">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-4">
               <div>
                 <h3 className="text-sm font-bold text-slate-100">
                   Prompt Injection & Jailbreak Defense
                 </h3>
                 <p className="text-xs text-slate-400 mt-1 max-w-xl">
-                  Enforces heuristic scanners to detect instruction overrides (e.g. &quot;ignore previous instructions&quot;), DAN roleplay modes, and system prompt extraction attacks.
+                  Runs English regex heuristics for instruction overrides (e.g. &quot;ignore previous instructions&quot;), DAN roleplay modes, and system prompt extraction phrases. <strong>Precedence:</strong> when enabled, matched injections are always blocked (HTTP 403) even in <strong>ALLOW</strong> or <strong>REDACT</strong> mode. When disabled, injections are never blocked (in <strong>BLOCK</strong> mode, requests with only injection matches are allowed unmodified; in <strong>REDACT</strong> mode, matched phrases are redacted).
                 </p>
               </div>
               <label className="relative inline-flex items-center cursor-pointer">
@@ -290,8 +290,18 @@ export default function PoliciesPage() {
               <h3 className="text-sm font-bold text-slate-100">Upstream LLM Configuration (BYOK)</h3>
             </div>
             <p className="text-xs text-slate-400">
-              Enter any OpenAI compatible chat completions base URL and its key. Server configured providers can also be selected by alias per request in the playground.
+              Enter a compatible <code className="font-mono text-slate-300">/chat/completions</code> base URL for any AI model and its Bearer API key. Native non-chat-completions APIs require dedicated adapters. Server configured providers can also be selected by alias per request in the playground.
             </p>
+
+            <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3.5 text-[11px] leading-relaxed text-slate-400 space-y-1">
+              <p className="font-semibold text-slate-300">Detection Scope &amp; Limitations</p>
+              <p>
+                <strong>Inspected data types:</strong> Email addresses, Luhn-valid credit card numbers (13–19 digits), AWS/OpenAI/GitHub token patterns, unbroken high-entropy strings (&ge;16 chars, entropy &ge;3.7), and literal English prompt-injection heuristics.
+              </p>
+              <p>
+                <strong>Inspected formats &amp; limits:</strong> Plain text, <code className="font-mono text-slate-300">type: &quot;text&quot;</code> content parts, tool definitions/arguments, and compatible streamed responses; unsupported media formats (images/audio/files) are rejected. Unlisted PII (such as phone numbers or SSNs) and obfuscated/encoded attacks are not detected, and educational sentences quoting attack phrases can still match.
+              </p>
+            </div>
 
             <div className="grid grid-cols-1 gap-4 pt-2">
               <div>

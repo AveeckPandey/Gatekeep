@@ -1,3 +1,19 @@
+"""Deterministic detection rules and heuristic boundaries for GateKeep.
+
+Inspected data types:
+- Secrets: AWS access keys (AKIA/ABIA/ACCA/ASIA), OpenAI-style sk-/sk-proj-/sk-admin- keys,
+  GitHub tokens (ghp_, github_pat_, gho_, ghu_, ghs_, ghr_), plus unbroken tokens >= 16 chars
+  whose Shannon entropy meets ENTROPY_THRESHOLD (default 3.7).
+- PII: Email addresses and Luhn-valid major-brand credit card numbers (13-19 digits).
+- Prompt injections: Literal English regex heuristics for instruction overrides, system prompt
+  extraction attempts, and known jailbreak personas (e.g., DAN / developer mode).
+
+Known limits:
+- Unlisted PII (such as phone numbers, SSNs, or street addresses) is not detected by these rules.
+- Obfuscated, encoded, or paraphrased injections that avoid the literal regexes are not matched.
+- Benign or educational text that quotes an attack phrase literally can still trigger a match.
+"""
+
 import re
 from typing import Dict, List, Pattern
 

@@ -6,11 +6,27 @@ import {
   Search,
   ChevronDown,
   ChevronRight,
+  AlertCircle,
 } from "lucide-react";
 import { Header } from "@/components/Header";
 import { useAuth } from "@/context/AuthContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
 import { api, AuditLog } from "@/lib/api";
+
+const ACTION_FILTERS = ["ALL", "BLOCK", "REDACT", "ALLOW", "ERROR"] as const;
+
+function getActionBadgeStyle(action: string, isBlocked: boolean): string {
+  if (action === "ERROR") {
+    return "bg-orange-500/15 text-orange-400 border border-orange-500/30";
+  }
+  if (action === "BLOCK" || isBlocked) {
+    return "bg-rose-500/15 text-rose-400 border border-rose-500/30";
+  }
+  if (action === "REDACT") {
+    return "bg-amber-500/15 text-amber-400 border border-amber-500/30";
+  }
+  return "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30";
+}
 
 export default function AuditLogsPage() {
   const { token } = useAuth();
@@ -21,42 +37,67 @@ export default function AuditLogsPage() {
   const [searchTerm, setSearchTerm] = useState<string>("");
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [logsError, setLogsError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+
+  const fetchLogs = useCallback(
+    async (isCancelled?: () => boolean) => {
+      if (!token || !activeWorkspace) return;
+      try {
+        const data = await api.getLogs(token, activeWorkspace.id, 100);
+        if (isCancelled?.()) return;
+        setLogs(data);
+        setLogsError(null);
+      } catch (err: unknown) {
+        if (isCancelled?.()) return;
+        setLogsError(err instanceof Error ? err.message : "Failed to load audit logs");
+      } finally {
+        if (!isCancelled?.()) {
+          setLastUpdated(new Date());
+          setIsLoading(false);
+        }
+      }
+    },
+    [token, activeWorkspace]
+  );
 
   const loadLogs = useCallback(async () => {
     if (!token || !activeWorkspace) return;
     setIsLoading(true);
-    try {
-      const data = await api.getLogs(token, activeWorkspace.id, 100);
-      setLogs(data);
-    } catch (err: unknown) {
-      console.error("Failed to load logs:", err);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [token, activeWorkspace]);
+    await fetchLogs();
+  }, [token, activeWorkspace, fetchLogs]);
 
   useEffect(() => {
-    let isMounted = true;
+    let cancelled = false;
     if (!token || !activeWorkspace) return;
 
-    api
-      .getLogs(token, activeWorkspace.id, 100)
-      .then((data) => {
-        if (!isMounted) return;
-        setLogs(data);
-      })
-      .catch((err: unknown) => {
-        console.error("Failed to load logs:", err);
-      })
-      .finally(() => {
-        if (!isMounted) return;
-        setIsLoading(false);
-      });
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setIsLoading(true);
+      setLogs([]);
+      setLogsError(null);
+      void fetchLogs(() => cancelled);
+    });
+
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        fetchLogs(() => cancelled);
+      }
+    }, 15000);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        fetchLogs(() => cancelled);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
 
     return () => {
-      isMounted = false;
+      cancelled = true;
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [token, activeWorkspace]);
+  }, [token, activeWorkspace, fetchLogs]);
 
   // Filter logs based on selection & search
   const filteredLogs = logs.filter((l) => {
@@ -74,17 +115,17 @@ export default function AuditLogsPage() {
     <div className="flex-1 pb-12">
       <Header
         title="Firewall Audit Logs"
-        subtitle="Real-time inspection ledger, threat detections, and latency breakdown"
+        subtitle="Inspection ledger, threat detections, and latency breakdown (auto-refreshes every 15s)"
       />
 
       <div className="max-w-7xl mx-auto px-8 py-6 space-y-6">
         {/* Filters and Search Bar */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col md:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-2 w-full md:w-auto">
+          <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
             <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider mr-1">
               Filter Action:
             </span>
-            {["ALL", "BLOCK", "REDACT", "ALLOW"].map((action) => (
+            {ACTION_FILTERS.map((action) => (
               <button
                 key={action}
                 onClick={() => setFilterAction(action)}
@@ -94,6 +135,8 @@ export default function AuditLogsPage() {
                       ? "bg-rose-500 text-slate-950"
                       : action === "REDACT"
                       ? "bg-amber-500 text-slate-950"
+                      : action === "ERROR"
+                      ? "bg-orange-500 text-slate-950"
                       : action === "ALLOW"
                       ? "bg-emerald-500 text-slate-950"
                       : "bg-slate-200 text-slate-950"
@@ -106,6 +149,11 @@ export default function AuditLogsPage() {
           </div>
 
           <div className="flex items-center gap-2 w-full md:w-auto">
+            {lastUpdated && (
+              <span className="text-[11px] text-slate-500 font-mono hidden sm:inline">
+                Updated {lastUpdated.toLocaleTimeString()}
+              </span>
+            )}
             <div className="relative flex-1 md:w-64">
               <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
               <input
@@ -128,7 +176,25 @@ export default function AuditLogsPage() {
 
         {/* Audit Logs Table */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg">
-          {filteredLogs.length === 0 ? (
+          {logsError ? (
+            <div className="p-6 flex flex-wrap items-center justify-between gap-3 bg-rose-500/10 text-rose-300 text-xs">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                <span>Failed to load audit logs: {logsError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={loadLogs}
+                className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 font-semibold"
+              >
+                Retry
+              </button>
+            </div>
+          ) : isLoading && !lastUpdated ? (
+            <div className="text-center py-12 text-xs text-slate-400">
+              Loading audit logs...
+            </div>
+          ) : filteredLogs.length === 0 ? (
             <div className="text-center py-12 text-xs text-slate-500">
               {logs.length === 0
                 ? "No audit records recorded yet for this workspace."
@@ -142,7 +208,7 @@ export default function AuditLogsPage() {
                     <th className="py-3 px-4">Action</th>
                     <th className="py-3 px-4">Timestamp</th>
                     <th className="py-3 px-4">Model</th>
-                    <th className="py-3 px-4">Detected Findings</th>
+                    <th className="py-3 px-4">Detected Findings / Outcome</th>
                     <th className="py-3 px-4">Latency (Insp. / Total)</th>
                     <th className="py-3 px-4 text-right">Details</th>
                   </tr>
@@ -150,8 +216,7 @@ export default function AuditLogsPage() {
                 <tbody className="divide-y divide-slate-800/60 font-sans">
                   {filteredLogs.map((log) => {
                     const isExpanded = expandedLogId === log.id;
-                    const isBlock = log.action === "BLOCK" || log.is_blocked;
-                    const isRedact = log.action === "REDACT";
+                    const isErrorEntry = log.action === "ERROR";
 
                     return (
                       <React.Fragment key={log.id}>
@@ -161,13 +226,10 @@ export default function AuditLogsPage() {
                         >
                           <td className="py-3 px-4">
                             <span
-                              className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider uppercase ${
-                                isBlock
-                                  ? "bg-rose-500/15 text-rose-400 border border-rose-500/30"
-                                  : isRedact
-                                  ? "bg-amber-500/15 text-amber-400 border border-amber-500/30"
-                                  : "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
-                              }`}
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider uppercase ${getActionBadgeStyle(
+                                log.action,
+                                log.is_blocked
+                              )}`}
                             >
                               {log.action}
                             </span>
@@ -192,6 +254,10 @@ export default function AuditLogsPage() {
                                   </span>
                                 ))}
                               </div>
+                            ) : isErrorEntry ? (
+                              <span className="text-orange-300 text-[11px]">
+                                {log.block_reason ? log.block_reason.slice(0, 60) : "Gateway or upstream error"}
+                              </span>
                             ) : (
                               <span className="text-slate-500 text-[11px]">None (Clean)</span>
                             )}
@@ -228,6 +294,8 @@ export default function AuditLogsPage() {
                                   <span className="font-mono text-slate-300">
                                     {log.upstream_ms !== null && log.upstream_ms !== undefined
                                       ? `${log.upstream_ms} ms`
+                                      : isErrorEntry
+                                      ? "N/A (Failed before upstream response)"
                                       : "N/A (Blocked before forwarding)"}
                                   </span>
                                 </div>
@@ -243,8 +311,16 @@ export default function AuditLogsPage() {
                               </div>
 
                               {log.block_reason && (
-                                <div className="p-2.5 rounded bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs">
-                                  <span className="font-bold">Block Reason: </span>
+                                <div
+                                  className={`p-2.5 rounded border text-xs ${
+                                    isErrorEntry
+                                      ? "bg-orange-500/10 border-orange-500/20 text-orange-300"
+                                      : "bg-rose-500/10 border-rose-500/20 text-rose-300"
+                                  }`}
+                                >
+                                  <span className="font-bold">
+                                    {isErrorEntry ? "Error Details: " : "Block Reason: "}
+                                  </span>
                                   {log.block_reason}
                                 </div>
                               )}

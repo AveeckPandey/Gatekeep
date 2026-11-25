@@ -16,6 +16,20 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+function clearStoredAuthAndKeys() {
+  localStorage.removeItem("gatekeep_token");
+  localStorage.removeItem("gatekeep_active_ws");
+  localStorage.removeItem("gatekeep_demo_key");
+  sessionStorage.removeItem("gatekeep_latest_key");
+  sessionStorage.removeItem("gatekeep_latest_key_prefix");
+  for (const key of Object.keys(sessionStorage)) {
+    if (key.startsWith("gatekeep_active_key_")) {
+      sessionStorage.removeItem(key);
+    }
+  }
+  document.cookie = "gatekeep_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
@@ -47,8 +61,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       })
       .catch(() => {
         if (isMounted) {
-          localStorage.removeItem("gatekeep_token");
-          document.cookie = "gatekeep_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+          clearStoredAuthAndKeys();
           setToken(null);
           setUser(null);
         }
@@ -68,6 +81,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setIsLoading(true);
     try {
       const resp = await api.login(email, pass);
+      clearStoredAuthAndKeys();
       localStorage.setItem("gatekeep_token", resp.access_token);
       document.cookie = `gatekeep_token=${resp.access_token}; path=/; max-age=86400; SameSite=Lax`;
       setToken(resp.access_token);
@@ -86,6 +100,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (!resp.confirmation_required) router.push("/login");
         return resp.confirmation_required;
       }
+      clearStoredAuthAndKeys();
       localStorage.setItem("gatekeep_token", resp.access_token);
       document.cookie = `gatekeep_token=${resp.access_token}; path=/; max-age=86400; SameSite=Lax`;
       setToken(resp.access_token);
@@ -101,6 +116,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setIsLoading(true);
     try {
       const resp = await api.demoAuth();
+      clearStoredAuthAndKeys();
       localStorage.setItem("gatekeep_token", resp.access_token);
       if (resp.demo_workspace_id) {
         localStorage.setItem("gatekeep_active_ws", resp.demo_workspace_id);
@@ -118,9 +134,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const logout = () => {
-    localStorage.removeItem("gatekeep_token");
-    localStorage.removeItem("gatekeep_active_ws");
-    document.cookie = "gatekeep_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+    clearStoredAuthAndKeys();
     setToken(null);
     setUser(null);
     router.push("/login");

@@ -1,7 +1,7 @@
 import asyncio
 import json
 import time
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -27,8 +27,50 @@ from app.security.detector import (
 )
 from app.security.rate_limiter import workspace_rate_limiter
 from app.security.ssrf import validate_upstream_url
+from app.security.stream_dlp import StreamingDlpSanitizer
 
 router = APIRouter(tags=["Data Plane Proxy"])
+
+_UNSUPPORTED_MEDIA_TYPES = {"image_url", "input_image", "input_audio", "audio", "file", "image"}
+_UNSUPPORTED_MEDIA_KEYS = {"image_url", "input_audio", "audio", "file", "images", "files", "attachments"}
+_STRUCTURAL_KEYS_SKIP_ENTROPY = {"id", "tool_call_id", "type", "required", "$schema", "format", "model"}
+_ALLOWED_CONTENT_PART_KEYS = {"type", "text", "cache_control", "annotations"}
+
+
+class UnsupportedFormatError(ValueError):
+    """Raised when a proxy payload contains an unsupported or uninspectable format."""
+
+
+class _InspectionAccumulator:
+    """Collects findings, timings, and aggregate policy action across inspected fields."""
+
+    def __init__(self, policy_mode: PolicyMode, block_injections: bool) -> None:
+        self.policy_mode = policy_mode
+        self.block_injections = block_injections
+        self.findings: List[Finding] = []
+        self.is_blocked = False
+        self.block_reasons: List[str] = []
+        self.action = "ALLOW"
+        self.inspection_ms = 0.0
+
+    def inspect_text(self, text: str, *, check_entropy: bool = True) -> str:
+        res = detector.inspect(
+            text=text,
+            policy_mode=self.policy_mode,
+            block_injections=self.block_injections,
+            check_entropy=check_entropy,
+        )
+        self.inspection_ms += res.inspection_ms
+        self.findings.extend(res.findings)
+        if res.is_blocked:
+            self.is_blocked = True
+            if res.block_reason:
+                self.block_reasons.append(res.block_reason)
+        if res.action == "BLOCK":
+            self.action = "BLOCK"
+        elif res.action == "REDACT" and self.action != "BLOCK":
+            self.action = "REDACT"
+        return res.sanitized_text
 
 
 def inspect_and_sanitize_content(
@@ -37,84 +79,402 @@ def inspect_and_sanitize_content(
     block_injections: bool,
 ) -> Tuple[Union[str, List[Any], Any], List[Finding], bool, List[str], str, float]:
     """
-    Recursively inspects and sanitizes message content:
-    - If None: returns (None, [], False, [], "ALLOW", 0.0).
-    - If string: runs detector.inspect(text).
-    - If list: recursively inspects each item (dict with type=text, nested lists, or raw strings).
-    - If unsupported/unexpected object: leaves as-is if primitive, or serializes/inspects text representations.
-    Returns: (sanitized_content, findings, is_blocked, block_reasons, action, inspection_ms)
+    Inspects and sanitizes message content (`None`, `str`, or `[{"type": "text", "text": ...}]`).
+    Rejects unsupported multimodal/binary parts rather than forwarding them uninspected.
     """
-    if content is None:
-        return (None, [], False, [], "ALLOW", 0.0)
+    acc = _InspectionAccumulator(policy_mode=policy_mode, block_injections=block_injections)
+    sanitized = _inspect_message_content(content, acc, strict=True)
+    return (
+        sanitized,
+        acc.findings,
+        acc.is_blocked,
+        acc.block_reasons,
+        acc.action,
+        acc.inspection_ms,
+    )
 
-    if isinstance(content, str):
-        res = detector.inspect(
-            text=content,
-            policy_mode=policy_mode,
-            block_injections=block_injections,
-        )
-        return (
-            res.sanitized_text,
-            res.findings,
-            res.is_blocked,
-            [res.block_reason] if res.block_reason else [],
-            res.action,
-            res.inspection_ms,
-        )
 
-    if isinstance(content, list):
-        sanitized_list = []
-        findings: List[Finding] = []
-        is_blocked = False
-        block_reasons: List[str] = []
-        action = "ALLOW"
-        total_ms = 0.0
+def _reject_if_media_value(value: Any, context: str) -> None:
+    if isinstance(value, str) and value.strip().lower().startswith(("data:image/", "data:audio/", "data:video/", "data:application/octet-stream")):
+        raise UnsupportedFormatError(f"Unsupported binary/data URI in {context}")
 
-        for item in content:
-            if isinstance(item, dict):
-                item_copy = dict(item)
-                item_type = item_copy.get("type")
-                if item_type == "text" and "text" in item_copy and isinstance(item_copy["text"], str):
-                    res = detector.inspect(
-                        text=item_copy["text"],
-                        policy_mode=policy_mode,
-                        block_injections=block_injections,
-                    )
-                    total_ms += res.inspection_ms
-                    findings.extend(res.findings)
-                    if res.is_blocked:
-                        is_blocked = True
-                        if res.block_reason:
-                            block_reasons.append(res.block_reason)
-                    if res.action == "BLOCK":
-                        action = "BLOCK"
-                    elif res.action == "REDACT" and action != "BLOCK":
-                        action = "REDACT"
-                    item_copy["text"] = res.sanitized_text
-                sanitized_list.append(item_copy)
-            elif isinstance(item, str):
-                res = detector.inspect(
-                    text=item,
-                    policy_mode=policy_mode,
-                    block_injections=block_injections,
+
+def _inspect_json_strings(
+    value: Any,
+    acc: _InspectionAccumulator,
+    *,
+    context: str,
+    skip_entropy: bool = False,
+    reject_media: bool = True,
+) -> Any:
+    """Recursively inspect all string values in supported JSON structures."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+
+    if isinstance(value, str):
+        if reject_media:
+            _reject_if_media_value(value, context)
+        return acc.inspect_text(value, check_entropy=not skip_entropy)
+
+    if isinstance(value, list):
+        return [
+            _inspect_json_strings(
+                item,
+                acc,
+                context=f"{context}[]",
+                skip_entropy=skip_entropy,
+                reject_media=reject_media,
+            )
+            for item in value
+        ]
+
+    if isinstance(value, dict):
+        if reject_media:
+            item_type = value.get("type")
+            if isinstance(item_type, str) and item_type in _UNSUPPORTED_MEDIA_TYPES:
+                raise UnsupportedFormatError(
+                    f"Unsupported media/content type '{item_type}' in {context}"
                 )
-                total_ms += res.inspection_ms
-                findings.extend(res.findings)
-                if res.is_blocked:
-                    is_blocked = True
-                    if res.block_reason:
-                        block_reasons.append(res.block_reason)
-                if res.action == "BLOCK":
-                    action = "BLOCK"
-                elif res.action == "REDACT" and action != "BLOCK":
-                    action = "REDACT"
-                sanitized_list.append(res.sanitized_text)
-            else:
-                sanitized_list.append(item)
+            for key in value:
+                if key in _UNSUPPORTED_MEDIA_KEYS and value[key] is not None:
+                    raise UnsupportedFormatError(
+                        f"Unsupported media field '{key}' in {context}"
+                    )
 
-        return (sanitized_list, findings, is_blocked, block_reasons, action, total_ms)
+        sanitized_dict: Dict[str, Any] = {}
+        for k, v in value.items():
+            key_skip_entropy = skip_entropy or (k in _STRUCTURAL_KEYS_SKIP_ENTROPY)
+            # Tool/function identifiers like `calculate_monthly_revenue` can trip entropy checks;
+            # still run deterministic secret/PII/injection regexes on `function.name`.
+            if k == "name" and context.endswith((".function", ".function_call", ".json_schema")) or (
+                k == "name" and context.startswith("functions")
+            ):
+                key_skip_entropy = True
+            sanitized_dict[k] = _inspect_json_strings(
+                v,
+                acc,
+                context=f"{context}.{k}",
+                skip_entropy=key_skip_entropy,
+                reject_media=reject_media,
+            )
+        return sanitized_dict
 
-    return (content, [], False, [], "ALLOW", 0.0)
+    raise UnsupportedFormatError(f"Unsupported value type in {context}")
+
+
+def _inspect_message_content(
+    content: Any,
+    acc: _InspectionAccumulator,
+    *,
+    strict: bool,
+) -> Any:
+    if content is None:
+        return None
+    if isinstance(content, str):
+        return acc.inspect_text(content)
+    if isinstance(content, list):
+        sanitized_list: List[Any] = []
+        for idx, item in enumerate(content):
+            if not isinstance(item, dict):
+                if strict:
+                    raise UnsupportedFormatError(
+                        f"Unsupported content part at index {idx}: expected object with type='text'"
+                    )
+                sanitized_list.append(_inspect_json_strings(item, acc, context=f"content[{idx}]", reject_media=False))
+                continue
+
+            item_type = item.get("type")
+            if item_type != "text" or not isinstance(item.get("text"), str):
+                if strict:
+                    raise UnsupportedFormatError(
+                        f"Unsupported content part type '{item_type}' at index {idx}; only 'text' parts are supported"
+                    )
+                sanitized_list.append(_inspect_json_strings(item, acc, context=f"content[{idx}]", reject_media=False))
+                continue
+
+            unknown_keys = set(item.keys()) - _ALLOWED_CONTENT_PART_KEYS
+            if strict and unknown_keys:
+                raise UnsupportedFormatError(
+                    f"Unsupported field(s) {sorted(unknown_keys)} in text content part at index {idx}"
+                )
+
+            item_copy = dict(item)
+            item_copy["text"] = acc.inspect_text(item_copy["text"])
+            for extra_key in item_copy:
+                if extra_key not in ("type", "text"):
+                    item_copy[extra_key] = _inspect_json_strings(
+                        item_copy[extra_key],
+                        acc,
+                        context=f"content[{idx}].{extra_key}",
+                        reject_media=strict,
+                    )
+            sanitized_list.append(item_copy)
+        return sanitized_list
+
+    if strict:
+        raise UnsupportedFormatError("Unsupported message content format")
+    return _inspect_json_strings(content, acc, context="content", reject_media=False)
+
+
+def _validate_and_inspect_message(
+    raw_msg: Dict[str, Any],
+    acc: _InspectionAccumulator,
+    msg_idx: int,
+) -> Dict[str, Any]:
+    """Preserve all message fields, inspect every text field, and reject unsupported formats."""
+    msg_copy = dict(raw_msg)
+
+    role = msg_copy.get("role")
+    if not isinstance(role, str) or not role.strip():
+        raise UnsupportedFormatError(f"Message at index {msg_idx} must have a non-empty string 'role'")
+    msg_copy["role"] = acc.inspect_text(role, check_entropy=False)
+
+    if "content" in msg_copy:
+        msg_copy["content"] = _inspect_message_content(msg_copy["content"], acc, strict=True)
+
+    if "name" in msg_copy and msg_copy["name"] is not None:
+        if not isinstance(msg_copy["name"], str):
+            raise UnsupportedFormatError(f"Message 'name' at index {msg_idx} must be a string")
+        msg_copy["name"] = acc.inspect_text(msg_copy["name"])
+
+    if "tool_call_id" in msg_copy and msg_copy["tool_call_id"] is not None:
+        if not isinstance(msg_copy["tool_call_id"], str):
+            raise UnsupportedFormatError(f"Message 'tool_call_id' at index {msg_idx} must be a string")
+        msg_copy["tool_call_id"] = acc.inspect_text(msg_copy["tool_call_id"], check_entropy=False)
+
+    if "tool_calls" in msg_copy and msg_copy["tool_calls"] is not None:
+        tool_calls = msg_copy["tool_calls"]
+        if not isinstance(tool_calls, list):
+            raise UnsupportedFormatError(f"Message 'tool_calls' at index {msg_idx} must be a list")
+        sanitized_tcs: List[Dict[str, Any]] = []
+        for tc_idx, tc in enumerate(tool_calls):
+            if not isinstance(tc, dict):
+                raise UnsupportedFormatError(f"Tool call at index {tc_idx} must be an object")
+            tc_type = tc.get("type")
+            if tc_type is not None and tc_type != "function":
+                raise UnsupportedFormatError(
+                    f"Unsupported tool_call type '{tc_type}' at message {msg_idx}; only 'function' is supported"
+                )
+            fn = tc.get("function")
+            if fn is not None:
+                if not isinstance(fn, dict):
+                    raise UnsupportedFormatError(f"tool_call.function at message {msg_idx} must be an object")
+                if "name" in fn and fn["name"] is not None and not isinstance(fn["name"], str):
+                    raise UnsupportedFormatError(f"tool_call.function.name at message {msg_idx} must be a string")
+                if "arguments" in fn and fn["arguments"] is not None and not isinstance(fn["arguments"], str):
+                    raise UnsupportedFormatError(
+                        f"tool_call.function.arguments at message {msg_idx} must be a string"
+                    )
+            sanitized_tcs.append(
+                _inspect_json_strings(
+                    tc,
+                    acc,
+                    context=f"messages[{msg_idx}].tool_calls[{tc_idx}]",
+                )
+            )
+        msg_copy["tool_calls"] = sanitized_tcs
+
+    if "function_call" in msg_copy and msg_copy["function_call"] is not None:
+        fc = msg_copy["function_call"]
+        if not isinstance(fc, dict):
+            raise UnsupportedFormatError(f"Message 'function_call' at index {msg_idx} must be an object")
+        if "name" in fc and fc["name"] is not None and not isinstance(fc["name"], str):
+            raise UnsupportedFormatError(f"function_call.name at message {msg_idx} must be a string")
+        if "arguments" in fc and fc["arguments"] is not None and not isinstance(fc["arguments"], str):
+            raise UnsupportedFormatError(f"function_call.arguments at message {msg_idx} must be a string")
+        msg_copy["function_call"] = _inspect_json_strings(
+            fc,
+            acc,
+            context=f"messages[{msg_idx}].function_call",
+        )
+
+    # Preserve and inspect all extra message fields (e.g., reasoning_content, refusal, metadata)
+    known_keys = {"role", "content", "name", "tool_calls", "tool_call_id", "function_call"}
+    for extra_key in list(msg_copy.keys()):
+        if extra_key in known_keys:
+            continue
+        if extra_key in _UNSUPPORTED_MEDIA_KEYS and msg_copy[extra_key] is not None:
+            raise UnsupportedFormatError(
+                f"Unsupported media field '{extra_key}' in message {msg_idx}"
+            )
+        msg_copy[extra_key] = _inspect_json_strings(
+            msg_copy[extra_key],
+            acc,
+            context=f"messages[{msg_idx}].{extra_key}",
+        )
+
+    return msg_copy
+
+
+def _validate_and_inspect_payload(
+    payload: ChatCompletionRequest,
+    policy: Policy,
+) -> Tuple[Dict[str, Any], _InspectionAccumulator]:
+    """Validate payload format and inspect all text-bearing request fields."""
+    if not payload.model or not payload.model.strip():
+        raise UnsupportedFormatError("Request 'model' must be a non-empty string")
+    if not payload.messages:
+        raise UnsupportedFormatError("Request 'messages' must contain at least one message")
+
+    acc = _InspectionAccumulator(policy_mode=policy.mode, block_injections=policy.block_injections)
+    forward_dict = payload.model_dump(exclude_unset=True, exclude={"provider"})
+
+    # Reject unsupported media/non-chat top-level parameters before inspection
+    for media_key in ("audio", "images", "files", "attachments"):
+        if media_key in forward_dict and forward_dict[media_key] is not None:
+            raise UnsupportedFormatError(
+                f"Unsupported request field '{media_key}': /v1/chat/completions supports text chat only"
+            )
+    if "modalities" in forward_dict and forward_dict["modalities"] is not None:
+        modalities = forward_dict["modalities"]
+        if not isinstance(modalities, list) or any(m != "text" for m in modalities):
+            raise UnsupportedFormatError(
+                "Unsupported 'modalities': only ['text'] is supported by /v1/chat/completions"
+            )
+
+    forward_dict["model"] = acc.inspect_text(payload.model, check_entropy=False)
+
+    # Validate & inspect messages while preserving supported extra fields
+    sanitized_messages: List[Dict[str, Any]] = []
+    for idx, msg in enumerate(payload.messages):
+        raw_msg = msg.model_dump(exclude_unset=True)
+        sanitized_messages.append(_validate_and_inspect_message(raw_msg, acc, idx))
+    forward_dict["messages"] = sanitized_messages
+
+    # Validate & inspect tool/function definitions and remaining text-bearing fields
+    if "tools" in forward_dict and forward_dict["tools"] is not None:
+        tools = forward_dict["tools"]
+        if not isinstance(tools, list):
+            raise UnsupportedFormatError("'tools' must be a list of tool definitions")
+        sanitized_tools: List[Dict[str, Any]] = []
+        for t_idx, tool in enumerate(tools):
+            if not isinstance(tool, dict):
+                raise UnsupportedFormatError(f"Tool definition at index {t_idx} must be an object")
+            if tool.get("type") != "function" or not isinstance(tool.get("function"), dict):
+                raise UnsupportedFormatError(
+                    f"Unsupported tool definition at index {t_idx}; only type='function' with a 'function' object is supported"
+                )
+            fn = tool["function"]
+            if not isinstance(fn.get("name"), str) or not fn["name"].strip():
+                raise UnsupportedFormatError(f"Tool function at index {t_idx} must have a string 'name'")
+            sanitized_tools.append(
+                _inspect_json_strings(tool, acc, context=f"tools[{t_idx}]")
+            )
+        forward_dict["tools"] = sanitized_tools
+
+    if "functions" in forward_dict and forward_dict["functions"] is not None:
+        functions = forward_dict["functions"]
+        if not isinstance(functions, list) or any(not isinstance(f, dict) for f in functions):
+            raise UnsupportedFormatError("'functions' must be a list of function objects")
+        forward_dict["functions"] = _inspect_json_strings(functions, acc, context="functions")
+
+    skip_top_level = {"model", "messages", "tools", "functions"}
+    for key, val in list(forward_dict.items()):
+        if key in skip_top_level:
+            continue
+        forward_dict[key] = _inspect_json_strings(val, acc, context=key)
+
+    return forward_dict, acc
+
+
+async def _record_audit_log(
+    repo: BaseRepository,
+    *,
+    workspace_id: str,
+    key_id: str,
+    model: str,
+    action: str,
+    is_blocked: bool,
+    block_reason: Optional[str],
+    findings: List[Dict[str, Any]],
+    inspection_ms: float,
+    upstream_ms: Optional[float],
+    start_total: float,
+    prompt_tokens: Optional[int] = None,
+    completion_tokens: Optional[int] = None,
+) -> float:
+    total_duration_ms = round((time.perf_counter() - start_total) * 1000, 3)
+    await repo.create_audit_log(
+        AuditLog(
+            workspace_id=workspace_id,
+            key_id=key_id,
+            model=model,
+            action=action,
+            is_blocked=is_blocked,
+            block_reason=block_reason,
+            findings_count=len(findings),
+            findings=findings,
+            inspection_ms=round(inspection_ms, 3),
+            upstream_ms=upstream_ms,
+            total_ms=total_duration_ms,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+    )
+    return total_duration_ms
+
+
+def _inspect_non_streaming_response(
+    upstream_data: Dict[str, Any],
+    policy: Policy,
+    acc: _InspectionAccumulator,
+) -> List[Finding]:
+    """Run response DLP on completion content, tool_calls, function_call, and text extras."""
+    response_findings: List[Finding] = []
+    if not policy.inspect_responses or "choices" not in upstream_data:
+        return response_findings
+
+    dlp_policy_mode = PolicyMode.ALLOW if policy.mode == PolicyMode.ALLOW else PolicyMode.REDACT
+    resp_acc = _InspectionAccumulator(policy_mode=dlp_policy_mode, block_injections=False)
+
+    for choice in upstream_data.get("choices", []):
+        if not isinstance(choice, dict):
+            continue
+        choice_msg = choice.get("message")
+        if not isinstance(choice_msg, dict):
+            continue
+
+        if choice_msg.get("content") is not None:
+            sanitized_content = _inspect_message_content(choice_msg["content"], resp_acc, strict=False)
+            if policy.mode != PolicyMode.ALLOW and resp_acc.action == "REDACT":
+                choice_msg["content"] = sanitized_content
+
+        for text_key in ("refusal", "reasoning_content"):
+            if isinstance(choice_msg.get(text_key), str):
+                sanitized_val = resp_acc.inspect_text(choice_msg[text_key])
+                if policy.mode != PolicyMode.ALLOW:
+                    choice_msg[text_key] = sanitized_val
+
+        tool_calls = choice_msg.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tc in tool_calls:
+                if isinstance(tc, dict) and isinstance(tc.get("function"), dict):
+                    fn = tc["function"]
+                    if isinstance(fn.get("name"), str):
+                        sanitized_name = resp_acc.inspect_text(fn["name"])
+                        if policy.mode != PolicyMode.ALLOW:
+                            fn["name"] = sanitized_name
+                    if isinstance(fn.get("arguments"), str):
+                        sanitized_args = resp_acc.inspect_text(fn["arguments"])
+                        if policy.mode != PolicyMode.ALLOW:
+                            fn["arguments"] = sanitized_args
+
+        function_call = choice_msg.get("function_call")
+        if isinstance(function_call, dict):
+            if isinstance(function_call.get("name"), str):
+                sanitized_name = resp_acc.inspect_text(function_call["name"])
+                if policy.mode != PolicyMode.ALLOW:
+                    function_call["name"] = sanitized_name
+            if isinstance(function_call.get("arguments"), str):
+                sanitized_args = resp_acc.inspect_text(function_call["arguments"])
+                if policy.mode != PolicyMode.ALLOW:
+                    function_call["arguments"] = sanitized_args
+
+    acc.inspection_ms += resp_acc.inspection_ms
+    response_findings.extend(resp_acc.findings)
+    if response_findings and policy.mode != PolicyMode.ALLOW and acc.action != "BLOCK":
+        acc.action = "REDACT"
+    return response_findings
 
 
 @router.post("/v1/chat/completions")
@@ -125,12 +485,12 @@ async def chat_completions_proxy(
     repo: BaseRepository = Depends(get_repository),
 ):
     """
-    OpenAI-Compatible Data Plane Gateway Proxy:
+    Compatible Chat Completions Data Plane Gateway Proxy:
     1. Authenticates request via Gateway API Key (`gw_live_...`).
-    2. Inspects user messages for PII, secrets, and prompt injection attacks.
+    2. Validates format and inspects messages, tool definitions, and text fields.
     3. Enforces workspace policy: ALLOW, REDACT, or BLOCK (HTTP 403).
-    4. Forwards sanitized payload to upstream LLM (e.g. NVIDIA Nemotron).
-    5. Returns response with `aegisgate_meta` telemetry and records audit log.
+    4. Forwards sanitized payload to the configured upstream Bearer endpoint.
+    5. Returns response with `aegisgate_meta` telemetry and records a single final audit entry.
     """
     start_total = time.perf_counter()
     api_key, workspace, policy = auth_context
@@ -141,140 +501,72 @@ async def chat_completions_proxy(
         limit_rpm=policy.rate_limit_rpm,
     )
     if not allowed:
+        detail = f"Rate limit exceeded: {policy.rate_limit_rpm} requests per minute limit reached for workspace."
+        await _record_audit_log(
+            repo,
+            workspace_id=workspace.id,
+            key_id=api_key.id,
+            model=payload.model,
+            action="ERROR",
+            is_blocked=False,
+            block_reason=detail,
+            findings=[],
+            inspection_ms=0.0,
+            upstream_ms=None,
+            start_total=start_total,
+        )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit exceeded: {policy.rate_limit_rpm} requests per minute limit reached for workspace.",
+            detail=detail,
             headers={"Retry-After": str(retry_after)},
         )
 
-    # 1. Security Inspection of Messages
-    all_findings: List[Finding] = []
-    has_blocked = False
-    block_reasons: List[str] = []
-    inspection_duration_ms = 0.0
-    sanitized_messages: List[Dict[str, Any]] = []
-    overall_action = "ALLOW"
-
-    for msg in payload.messages:
-        sanitized_content, findings, is_blocked, reasons, action, dur_ms = inspect_and_sanitize_content(
-            content=msg.content,
-            policy_mode=policy.mode,
-            block_injections=policy.block_injections,
+    # 1. Validate format & inspect all text-bearing request fields
+    try:
+        forward_dict, acc = _validate_and_inspect_payload(payload, policy)
+    except UnsupportedFormatError as exc:
+        detail = str(exc)
+        await _record_audit_log(
+            repo,
+            workspace_id=workspace.id,
+            key_id=api_key.id,
+            model=payload.model,
+            action="ERROR",
+            is_blocked=False,
+            block_reason=detail,
+            findings=[],
+            inspection_ms=0.0,
+            upstream_ms=None,
+            start_total=start_total,
         )
-        inspection_duration_ms += dur_ms
-        all_findings.extend(findings)
-        if is_blocked:
-            has_blocked = True
-            block_reasons.extend(reasons)
-        if action == "BLOCK":
-            overall_action = "BLOCK"
-        elif action == "REDACT" and overall_action != "BLOCK":
-            overall_action = "REDACT"
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
 
-        msg_dict: Dict[str, Any] = {"role": msg.role, "content": sanitized_content}
-        if msg.name:
-            if isinstance(msg.name, str):
-                name_sanitized, name_findings, name_blocked, name_reasons, name_action, name_ms = inspect_and_sanitize_content(
-                    content=msg.name,
-                    policy_mode=policy.mode,
-                    block_injections=policy.block_injections,
-                )
-                inspection_duration_ms += name_ms
-                all_findings.extend(name_findings)
-                if name_blocked:
-                    has_blocked = True
-                    block_reasons.extend(name_reasons)
-                if name_action == "BLOCK":
-                    overall_action = "BLOCK"
-                elif name_action == "REDACT" and overall_action != "BLOCK":
-                    overall_action = "REDACT"
-                msg_dict["name"] = name_sanitized
-            else:
-                msg_dict["name"] = msg.name
+    inspection_duration_ms = round(acc.inspection_ms, 3)
+    serialized_req_findings = [f.model_dump() for f in acc.findings]
 
-        if msg.tool_call_id:
-            msg_dict["tool_call_id"] = msg.tool_call_id
-
-        if msg.tool_calls:
-            sanitized_tc_list = []
-            for tc in msg.tool_calls:
-                tc_copy = dict(tc)
-                if "function" in tc_copy and isinstance(tc_copy["function"], dict):
-                    fn_copy = dict(tc_copy["function"])
-                    args = fn_copy.get("arguments")
-                    if isinstance(args, str):
-                        s_args, tc_f, tc_b, tc_r, tc_a, tc_m = inspect_and_sanitize_content(
-                            content=args,
-                            policy_mode=policy.mode,
-                            block_injections=policy.block_injections,
-                        )
-                        inspection_duration_ms += tc_m
-                        all_findings.extend(tc_f)
-                        if tc_b:
-                            has_blocked = True
-                            block_reasons.extend(tc_r)
-                        if tc_a == "BLOCK":
-                            overall_action = "BLOCK"
-                        elif tc_a == "REDACT" and overall_action != "BLOCK":
-                            overall_action = "REDACT"
-                        fn_copy["arguments"] = s_args
-                    tc_copy["function"] = fn_copy
-                sanitized_tc_list.append(tc_copy)
-            msg_dict["tool_calls"] = sanitized_tc_list
-
-        if msg.function_call:
-            fc_copy = dict(msg.function_call)
-            args = fc_copy.get("arguments")
-            if isinstance(args, str):
-                s_args, fc_f, fc_b, fc_r, fc_a, fc_m = inspect_and_sanitize_content(
-                    content=args,
-                    policy_mode=policy.mode,
-                    block_injections=policy.block_injections,
-                )
-                inspection_duration_ms += fc_m
-                all_findings.extend(fc_f)
-                if fc_b:
-                    has_blocked = True
-                    block_reasons.extend(fc_r)
-                if fc_a == "BLOCK":
-                    overall_action = "BLOCK"
-                elif fc_a == "REDACT" and overall_action != "BLOCK":
-                    overall_action = "REDACT"
-                fc_copy["arguments"] = s_args
-            msg_dict["function_call"] = fc_copy
-
-        sanitized_messages.append(msg_dict)
-
-    inspection_duration_ms = round(inspection_duration_ms, 3)
-
-    # 2. Enforcement: If Blocked, return HTTP 403 immediately and record audit log
-    if has_blocked or overall_action == "BLOCK":
-        total_duration_ms = round((time.perf_counter() - start_total) * 1000, 3)
-        block_reason_str = "; ".join(block_reasons) if block_reasons else "Security policy blocked request"
-
-        # Log blocked attempt
-        await repo.create_audit_log(
-            AuditLog(
-                workspace_id=workspace.id,
-                key_id=api_key.id,
-                model=payload.model,
-                action="BLOCK",
-                is_blocked=True,
-                block_reason=block_reason_str,
-                findings_count=len(all_findings),
-                findings=[f.model_dump() for f in all_findings],
-                inspection_ms=inspection_duration_ms,
-                upstream_ms=None,
-                total_ms=total_duration_ms,
-            )
+    # 2. Enforcement: If Blocked, return HTTP 403 immediately and record single audit log
+    if acc.is_blocked or acc.action == "BLOCK":
+        block_reason_str = "; ".join(acc.block_reasons) if acc.block_reasons else "Security policy blocked request"
+        total_duration_ms = await _record_audit_log(
+            repo,
+            workspace_id=workspace.id,
+            key_id=api_key.id,
+            model=payload.model,
+            action="BLOCK",
+            is_blocked=True,
+            block_reason=block_reason_str,
+            findings=serialized_req_findings,
+            inspection_ms=inspection_duration_ms,
+            upstream_ms=None,
+            start_total=start_total,
         )
 
         error_meta = AegisGateMeta(
             action="BLOCK",
             is_blocked=True,
             block_reason=block_reason_str,
-            findings_count=len(all_findings),
-            findings=[f.model_dump() for f in all_findings],
+            findings_count=len(acc.findings),
+            findings=serialized_req_findings,
             inspection_ms=inspection_duration_ms,
             upstream_ms=None,
             total_ms=total_duration_ms,
@@ -293,42 +585,61 @@ async def chat_completions_proxy(
             },
         )
 
-    # 3. Upstream Dispatch (or Demo Workspace Mock)
-    is_demo_workspace = (workspace.id.startswith("ws_demo") or policy.upstream_base_url.startswith("https://demo.gatekeep.local")) and not payload.provider
+    # 3. Upstream Dispatch Configuration (or Demo Workspace Mock)
+    is_demo_workspace = (
+        workspace.id.startswith("ws_demo")
+        or policy.upstream_base_url.startswith("https://demo.gatekeep.local")
+    ) and not payload.provider
     upstream_key = None
     upstream_base_url = policy.upstream_base_url
+
+    async def _fail_config(status_code: int, detail: str) -> None:
+        await _record_audit_log(
+            repo,
+            workspace_id=workspace.id,
+            key_id=api_key.id,
+            model=payload.model,
+            action="ERROR",
+            is_blocked=False,
+            block_reason=detail,
+            findings=serialized_req_findings,
+            inspection_ms=inspection_duration_ms,
+            upstream_ms=None,
+            start_total=start_total,
+        )
+        raise HTTPException(status_code=status_code, detail=detail)
 
     if payload.provider:
         try:
             upstream_base_url, upstream_key = resolve_provider(payload.provider, workspace.id)
         except PermissionError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
+            await _fail_config(status.HTTP_403_FORBIDDEN, str(exc))
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await _fail_config(status.HTTP_400_BAD_REQUEST, str(exc))
 
     if not (is_demo_workspace and not policy.encrypted_upstream_api_key):
         if not upstream_key and policy.encrypted_upstream_api_key:
             try:
                 upstream_key = decrypt_secret(policy.encrypted_upstream_api_key)
             except Exception:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to decrypt workspace upstream API key",
+                await _fail_config(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    "Failed to decrypt workspace upstream API key",
                 )
 
         if not upstream_key:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="No upstream API key configured for this workspace or selected provider.",
+            await _fail_config(
+                status.HTTP_502_BAD_GATEWAY,
+                "No upstream API key configured for this workspace or selected provider.",
             )
 
         # Validate target upstream URL to prevent SSRF before dispatch
         try:
             validate_upstream_url(upstream_base_url)
-        except ValueError as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid upstream URL configured in workspace policy: {e}",
+        except ValueError as exc:
+            await _fail_config(
+                status.HTTP_400_BAD_REQUEST,
+                f"Invalid upstream URL configured in workspace policy: {exc}",
             )
 
     # 4. Handle Server-Sent Events (SSE) Streaming if stream=True
@@ -349,7 +660,7 @@ async def chat_completions_proxy(
                         "id": chunk_id,
                         "object": "chat.completion.chunk",
                         "created": created_ts,
-                        "model": payload.model or "demo-nemotron-70b",
+                        "model": payload.model or "demo-model",
                         "choices": [
                             {
                                 "index": 0,
@@ -365,151 +676,160 @@ async def chat_completions_proxy(
                     "id": chunk_id,
                     "object": "chat.completion.chunk",
                     "created": created_ts,
-                    "model": payload.model or "demo-nemotron-70b",
+                    "model": payload.model or "demo-model",
                     "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
                 }
                 yield f"data: {json.dumps(done_chunk)}\n\n"
                 yield "data: [DONE]\n\n"
 
-                total_duration_ms = round((time.perf_counter() - start_total) * 1000, 3)
-                await repo.create_audit_log(
-                    AuditLog(
-                        workspace_id=workspace.id,
-                        key_id=api_key.id,
-                        model=payload.model,
-                        action=overall_action,
-                        is_blocked=False,
-                        findings_count=len(all_findings),
-                        findings=[f.model_dump() for f in all_findings],
-                        inspection_ms=inspection_duration_ms,
-                        upstream_ms=8.5,
-                        total_ms=total_duration_ms,
-                    )
+                await _record_audit_log(
+                    repo,
+                    workspace_id=workspace.id,
+                    key_id=api_key.id,
+                    model=payload.model,
+                    action=acc.action,
+                    is_blocked=False,
+                    block_reason=None,
+                    findings=serialized_req_findings,
+                    inspection_ms=inspection_duration_ms,
+                    upstream_ms=8.5,
+                    start_total=start_total,
                 )
 
             return StreamingResponse(demo_sse_generator(), media_type="text/event-stream")
 
-        # Live upstream SSE forward
-        forward_dict = payload.model_dump(exclude_unset=True, exclude={"provider"})
-        forward_dict["messages"] = sanitized_messages
-        base_url = upstream_base_url.rstrip("/")
-        target_url = f"{base_url}/chat/completions"
+        # Live upstream SSE: connect and inspect upstream status BEFORE starting HTTP 200 stream
+        target_url = f"{upstream_base_url.rstrip('/')}/chat/completions"
         upstream_headers = {
             "Authorization": f"Bearer {upstream_key}",
             "Content-Type": "application/json",
         }
+        client = httpx.AsyncClient(timeout=60.0, follow_redirects=False)
+        upstream_start = time.perf_counter()
+        try:
+            req = client.build_request("POST", target_url, headers=upstream_headers, json=forward_dict)
+            upstream_resp = await client.send(req, stream=True)
+        except httpx.RequestError as exc:
+            await client.aclose()
+            upstream_duration_ms = round((time.perf_counter() - upstream_start) * 1000, 3)
+            detail = f"Failed to connect to upstream LLM service: {exc}"
+            await _record_audit_log(
+                repo,
+                workspace_id=workspace.id,
+                key_id=api_key.id,
+                model=payload.model,
+                action="ERROR",
+                is_blocked=False,
+                block_reason=detail,
+                findings=serialized_req_findings,
+                inspection_ms=inspection_duration_ms,
+                upstream_ms=upstream_duration_ms,
+                start_total=start_total,
+            )
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
+
+        if upstream_resp.status_code >= 400:
+            err_body = await upstream_resp.aread()
+            upstream_duration_ms = round((time.perf_counter() - upstream_start) * 1000, 3)
+            media_type = upstream_resp.headers.get("content-type", "application/json")
+            status_code = upstream_resp.status_code
+            await upstream_resp.aclose()
+            await client.aclose()
+            await _record_audit_log(
+                repo,
+                workspace_id=workspace.id,
+                key_id=api_key.id,
+                model=payload.model,
+                action="ERROR",
+                is_blocked=False,
+                block_reason=f"Upstream returned HTTP {status_code}",
+                findings=serialized_req_findings,
+                inspection_ms=inspection_duration_ms,
+                upstream_ms=upstream_duration_ms,
+                start_total=start_total,
+            )
+            try:
+                err_json = json.loads(err_body.decode("utf-8"))
+                return JSONResponse(status_code=status_code, content=err_json)
+            except Exception:
+                return Response(content=err_body, status_code=status_code, media_type=media_type)
+
+        sanitizer = StreamingDlpSanitizer(
+            policy_mode=policy.mode,
+            inspect_responses=policy.inspect_responses,
+        )
 
         async def upstream_sse_generator():
-            nonlocal overall_action
-            upstream_start = time.perf_counter()
-            response_findings_stream: List[Finding] = []
-            stream_error = None
-            dlp_policy_mode = (
-                PolicyMode.ALLOW if policy.mode == PolicyMode.ALLOW else PolicyMode.REDACT
-            )
-
+            stream_error: Optional[str] = None
+            overall_action = acc.action
+            done_sent = False
             try:
-                async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
-                    async with client.stream(
-                        "POST",
-                        target_url,
-                        headers=upstream_headers,
-                        json=forward_dict,
-                    ) as upstream_resp:
-                        if upstream_resp.status_code >= 400:
-                            err_body = await upstream_resp.aread()
-                            total_duration_ms = round((time.perf_counter() - start_total) * 1000, 3)
-                            upstream_duration_ms = round((time.perf_counter() - upstream_start) * 1000, 3)
-                            await repo.create_audit_log(
-                                AuditLog(
-                                    workspace_id=workspace.id,
-                                    key_id=api_key.id,
-                                    model=payload.model,
-                                    action="ERROR",
-                                    is_blocked=False,
-                                    block_reason=f"Upstream returned HTTP {upstream_resp.status_code}",
-                                    findings_count=len(all_findings),
-                                    findings=[f.model_dump() for f in all_findings],
-                                    inspection_ms=inspection_duration_ms,
-                                    upstream_ms=upstream_duration_ms,
-                                    total_ms=total_duration_ms,
-                                )
-                            )
-                            yield f"data: {err_body.decode(errors='replace')}\n\n"
+                async for line in upstream_resp.aiter_lines():
+                    if not line:
+                        continue
+                    if line.startswith("data: "):
+                        data_str = line[6:].strip()
+                        if data_str == "[DONE]":
+                            for flushed_chunk in sanitizer.flush_all():
+                                yield f"data: {json.dumps(flushed_chunk)}\n\n"
                             yield "data: [DONE]\n\n"
-                            return
+                            done_sent = True
+                            break
+                        try:
+                            chunk_json = json.loads(data_str)
+                            for out_chunk in sanitizer.process_chunk(chunk_json):
+                                yield f"data: {json.dumps(out_chunk)}\n\n"
+                        except json.JSONDecodeError:
+                            yield f"{line}\n\n"
+                    else:
+                        yield f"{line}\n\n"
 
-                        async for line in upstream_resp.aiter_lines():
-                            if not line:
-                                continue
-                            if line.startswith("data: "):
-                                data_str = line[6:].strip()
-                                if data_str == "[DONE]":
-                                    yield "data: [DONE]\n\n"
-                                    break
-                                try:
-                                    chunk_json = json.loads(data_str)
-                                    if policy.inspect_responses:
-                                        for ch in chunk_json.get("choices", []):
-                                            delta = ch.get("delta", {})
-                                            delta_content = delta.get("content")
-                                            if isinstance(delta_content, str):
-                                                dlp_res = detector.inspect(
-                                                    text=delta_content,
-                                                    policy_mode=dlp_policy_mode,
-                                                    block_injections=False,
-                                                )
-                                                if dlp_res.findings:
-                                                    delta["content"] = dlp_res.sanitized_text
-                                                    response_findings_stream.extend(dlp_res.findings)
-                                                    if overall_action != "BLOCK" and policy.mode != PolicyMode.ALLOW:
-                                                        overall_action = "REDACT"
-                                    yield f"data: {json.dumps(chunk_json)}\n\n"
-                                except json.JSONDecodeError:
-                                    yield f"{line}\n\n"
-                            else:
-                                yield f"{line}\n\n"
-
+                if not done_sent:
+                    for flushed_chunk in sanitizer.flush_all():
+                        yield f"data: {json.dumps(flushed_chunk)}\n\n"
             except Exception as exc:
                 stream_error = str(exc)
-                yield f'data: {{"error": {{"message": "Stream interrupted: {stream_error}"}}}}\n\n'
+                yield f"data: {json.dumps({'error': {'message': f'Stream interrupted: {stream_error}'}})}\n\n"
                 yield "data: [DONE]\n\n"
             finally:
+                await upstream_resp.aclose()
+                await client.aclose()
                 upstream_duration_ms = round((time.perf_counter() - upstream_start) * 1000, 3)
-                total_duration_ms = round((time.perf_counter() - start_total) * 1000, 3)
-                all_combined_findings = [f.model_dump() for f in all_findings]
-                for rf in response_findings_stream:
+                if sanitizer.redacted and overall_action != "BLOCK":
+                    overall_action = "REDACT"
+                all_combined_findings = list(serialized_req_findings)
+                for rf in sanitizer.response_findings:
                     rf_dict = rf.model_dump()
                     rf_dict["source"] = "response_dlp"
                     all_combined_findings.append(rf_dict)
 
-                await repo.create_audit_log(
-                    AuditLog(
-                        workspace_id=workspace.id,
-                        key_id=api_key.id,
-                        model=payload.model,
-                        action="ERROR" if stream_error else overall_action,
-                        is_blocked=False,
-                        block_reason=stream_error,
-                        findings_count=len(all_combined_findings),
-                        findings=all_combined_findings,
-                        inspection_ms=inspection_duration_ms,
-                        upstream_ms=upstream_duration_ms,
-                        total_ms=total_duration_ms,
-                    )
+                usage_info = sanitizer.usage or {}
+                await _record_audit_log(
+                    repo,
+                    workspace_id=workspace.id,
+                    key_id=api_key.id,
+                    model=payload.model,
+                    action="ERROR" if stream_error else overall_action,
+                    is_blocked=False,
+                    block_reason=stream_error,
+                    findings=all_combined_findings,
+                    inspection_ms=inspection_duration_ms + sanitizer.inspection_ms,
+                    upstream_ms=upstream_duration_ms,
+                    start_total=start_total,
+                    prompt_tokens=usage_info.get("prompt_tokens"),
+                    completion_tokens=usage_info.get("completion_tokens"),
                 )
 
         return StreamingResponse(upstream_sse_generator(), media_type="text/event-stream")
 
     # 5. Non-Streaming Dispatch
     if is_demo_workspace and not policy.encrypted_upstream_api_key:
-        # Synthesize simulated completion for instant 10-second demo/recruiter playground
         upstream_duration_ms = 8.5
         upstream_data = {
             "id": f"chatcmpl-demo-{int(time.time())}",
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": payload.model or "demo-nemotron-70b",
+            "model": payload.model or "demo-model",
             "choices": [
                 {
                     "index": 0,
@@ -527,19 +847,12 @@ async def chat_completions_proxy(
             },
         }
     else:
-        # Prepare Forwarding Payload
-        forward_dict = payload.model_dump(exclude_unset=True, exclude={"provider"})
-        forward_dict["messages"] = sanitized_messages
-
-        base_url = upstream_base_url.rstrip("/")
-        target_url = f"{base_url}/chat/completions"
-
+        target_url = f"{upstream_base_url.rstrip('/')}/chat/completions"
         upstream_headers = {
             "Authorization": f"Bearer {upstream_key}",
             "Content-Type": "application/json",
         }
 
-        # Forward to Upstream LLM via httpx (follow_redirects=False prevents redirect SSRF)
         upstream_start = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
@@ -549,47 +862,38 @@ async def chat_completions_proxy(
                     json=forward_dict,
                 )
         except httpx.RequestError as exc:
-            total_duration_ms = round((time.perf_counter() - start_total) * 1000, 3)
             upstream_duration_ms = round((time.perf_counter() - upstream_start) * 1000, 3)
-            await repo.create_audit_log(
-                AuditLog(
-                    workspace_id=workspace.id,
-                    key_id=api_key.id,
-                    model=payload.model,
-                    action="ERROR",
-                    is_blocked=False,
-                    block_reason=f"Failed to connect to upstream LLM service: {str(exc)}",
-                    findings_count=len(all_findings),
-                    findings=[f.model_dump() for f in all_findings],
-                    inspection_ms=inspection_duration_ms,
-                    upstream_ms=upstream_duration_ms,
-                    total_ms=total_duration_ms,
-                )
+            detail = f"Failed to connect to upstream LLM service: {exc}"
+            await _record_audit_log(
+                repo,
+                workspace_id=workspace.id,
+                key_id=api_key.id,
+                model=payload.model,
+                action="ERROR",
+                is_blocked=False,
+                block_reason=detail,
+                findings=serialized_req_findings,
+                inspection_ms=inspection_duration_ms,
+                upstream_ms=upstream_duration_ms,
+                start_total=start_total,
             )
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Failed to connect to upstream LLM service: {str(exc)}",
-            )
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
 
         upstream_duration_ms = round((time.perf_counter() - upstream_start) * 1000, 3)
 
         if upstream_resp.status_code >= 400:
-            total_duration_ms = round((time.perf_counter() - start_total) * 1000, 3)
-            # Log upstream failure in audit ledger to prevent repudiation
-            await repo.create_audit_log(
-                AuditLog(
-                    workspace_id=workspace.id,
-                    key_id=api_key.id,
-                    model=payload.model,
-                    action="ERROR",
-                    is_blocked=False,
-                    block_reason=f"Upstream returned HTTP {upstream_resp.status_code}",
-                    findings_count=len(all_findings),
-                    findings=[f.model_dump() for f in all_findings],
-                    inspection_ms=inspection_duration_ms,
-                    upstream_ms=upstream_duration_ms,
-                    total_ms=total_duration_ms,
-                )
+            await _record_audit_log(
+                repo,
+                workspace_id=workspace.id,
+                key_id=api_key.id,
+                model=payload.model,
+                action="ERROR",
+                is_blocked=False,
+                block_reason=f"Upstream returned HTTP {upstream_resp.status_code}",
+                findings=serialized_req_findings,
+                inspection_ms=inspection_duration_ms,
+                upstream_ms=upstream_duration_ms,
+                start_total=start_total,
             )
             try:
                 err_json = upstream_resp.json()
@@ -601,89 +905,63 @@ async def chat_completions_proxy(
                     media_type=upstream_resp.headers.get("content-type", "application/json"),
                 )
 
-        upstream_data = upstream_resp.json()
+        try:
+            upstream_data = upstream_resp.json()
+        except Exception as exc:
+            detail = "Upstream returned invalid JSON response"
+            await _record_audit_log(
+                repo,
+                workspace_id=workspace.id,
+                key_id=api_key.id,
+                model=payload.model,
+                action="ERROR",
+                is_blocked=False,
+                block_reason=detail,
+                findings=serialized_req_findings,
+                inspection_ms=inspection_duration_ms,
+                upstream_ms=upstream_duration_ms,
+                start_total=start_total,
+            )
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
 
     # 6. Response DLP (Output Inspection)
-    response_findings: List[Finding] = []
-    dlp_policy_mode = (
-        PolicyMode.ALLOW if policy.mode == PolicyMode.ALLOW else PolicyMode.REDACT
-    )
-    if policy.inspect_responses and "choices" in upstream_data:
-        for choice in upstream_data.get("choices", []):
-            choice_msg = choice.get("message", {})
-            choice_content = choice_msg.get("content")
-            if choice_content is not None:
-                sanitized_choice_content, c_findings, _, _, _, c_ms = inspect_and_sanitize_content(
-                    content=choice_content,
-                    policy_mode=dlp_policy_mode,
-                    block_injections=False,
-                )
-                inspection_duration_ms += c_ms
-                if c_findings:
-                    if policy.mode != PolicyMode.ALLOW:
-                        choice_msg["content"] = sanitized_choice_content
-                        if overall_action != "BLOCK":
-                            overall_action = "REDACT"
-                    response_findings.extend(c_findings)
-
-            # Inspect tool_calls function arguments for leaked secrets
-            tool_calls = choice_msg.get("tool_calls")
-            if isinstance(tool_calls, list):
-                for tc in tool_calls:
-                    if isinstance(tc, dict) and "function" in tc and isinstance(tc["function"], dict):
-                        fn = tc["function"]
-                        args = fn.get("arguments")
-                        if isinstance(args, str):
-                            sanitized_args, tc_findings, _, _, _, tc_ms = inspect_and_sanitize_content(
-                                content=args,
-                                policy_mode=dlp_policy_mode,
-                                block_injections=False,
-                            )
-                            inspection_duration_ms += tc_ms
-                            if tc_findings:
-                                if policy.mode != PolicyMode.ALLOW:
-                                    fn["arguments"] = sanitized_args
-                                    if overall_action != "BLOCK":
-                                        overall_action = "REDACT"
-                                response_findings.extend(tc_findings)
-
-            # Inspect function_call arguments for leaked secrets
-            function_call = choice_msg.get("function_call")
-            if isinstance(function_call, dict):
-                args = function_call.get("arguments")
-                if isinstance(args, str):
-                    sanitized_args, fc_findings, _, _, _, fc_ms = inspect_and_sanitize_content(
-                        content=args,
-                        policy_mode=dlp_policy_mode,
-                        block_injections=False,
-                    )
-                    inspection_duration_ms += fc_ms
-                    if fc_findings:
-                        if policy.mode != PolicyMode.ALLOW:
-                            function_call["arguments"] = sanitized_args
-                            if overall_action != "BLOCK":
-                                overall_action = "REDACT"
-                        response_findings.extend(fc_findings)
-
-    total_duration_ms = round((time.perf_counter() - start_total) * 1000, 3)
+    response_findings = _inspect_non_streaming_response(upstream_data, policy, acc)
+    inspection_duration_ms = round(acc.inspection_ms, 3)
 
     # 7. Extract token usage and build aegisgate_meta
-    usage_info = upstream_data.get("usage", {})
+    usage_info = upstream_data.get("usage") or {}
     prompt_tokens = usage_info.get("prompt_tokens")
     completion_tokens = usage_info.get("completion_tokens")
 
-    all_combined_findings = [f.model_dump() for f in all_findings]
+    all_combined_findings = list(serialized_req_findings)
     for rf in response_findings:
         rf_dict = rf.model_dump()
         rf_dict["source"] = "response_dlp"
         all_combined_findings.append(rf_dict)
 
-    meta = AegisGateMeta(
-        action=overall_action,
+    # 8. Record single final Audit Log
+    total_duration_ms = await _record_audit_log(
+        repo,
+        workspace_id=workspace.id,
+        key_id=api_key.id,
+        model=payload.model,
+        action=acc.action,
         is_blocked=False,
         block_reason=None,
-        findings_count=len(all_findings),
-        findings=[f.model_dump() for f in all_findings],
+        findings=all_combined_findings,
+        inspection_ms=inspection_duration_ms,
+        upstream_ms=upstream_duration_ms,
+        start_total=start_total,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
+
+    meta = AegisGateMeta(
+        action=acc.action,
+        is_blocked=False,
+        block_reason=None,
+        findings_count=len(acc.findings),
+        findings=serialized_req_findings,
         response_findings_count=len(response_findings),
         response_findings=[f.model_dump() for f in response_findings],
         inspection_ms=inspection_duration_ms,
@@ -692,24 +970,5 @@ async def chat_completions_proxy(
         policy_mode=policy.mode.value,
     )
     upstream_data["aegisgate_meta"] = meta.model_dump()
-
-    # 8. Record Audit Log
-    await repo.create_audit_log(
-        AuditLog(
-            workspace_id=workspace.id,
-            key_id=api_key.id,
-            model=payload.model,
-            action=overall_action,
-            is_blocked=False,
-            block_reason=None,
-            findings_count=len(all_combined_findings),
-            findings=all_combined_findings,
-            inspection_ms=inspection_duration_ms,
-            upstream_ms=upstream_duration_ms,
-            total_ms=total_duration_ms,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-        )
-    )
 
     return JSONResponse(status_code=status.HTTP_200_OK, content=upstream_data)

@@ -93,7 +93,7 @@ export interface AuditLog {
   workspace_id: string;
   key_id?: string | null;
   model: string;
-  action: "ALLOW" | "REDACT" | "BLOCK";
+  action: "ALLOW" | "REDACT" | "BLOCK" | "ERROR";
   is_blocked: boolean;
   block_reason?: string | null;
   findings_count: number;

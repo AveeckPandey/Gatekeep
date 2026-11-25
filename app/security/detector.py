@@ -105,6 +105,7 @@ class SecurityDetector:
         text: str,
         policy_mode: PolicyMode = PolicyMode.REDACT,
         block_injections: bool = True,
+        check_entropy: bool = True,
     ) -> InspectionResult:
         """
         Inspects text against security rules and returns an InspectionResult
@@ -168,34 +169,35 @@ class SecurityDetector:
                 replacement_spans.append((start, end, "[REDACTED_CREDIT_CARD]"))
 
         # 3. High-Entropy Secret Detection (Shannon Entropy)
-        for match in self.candidate_entropy_regex.finditer(text):
-            token = match.group()
-            start, end = match.span()
+        if check_entropy:
+            for match in self.candidate_entropy_regex.finditer(text):
+                token = match.group()
+                start, end = match.span()
 
-            # Skip spans already claimed by regex/credit card
-            if any(s <= start < e or s < end <= e for s, e, _ in replacement_spans):
-                continue
+                # Skip spans already claimed by regex/credit card
+                if any(s <= start < e or s < end <= e for s, e, _ in replacement_spans):
+                    continue
 
-            # Strip typical separators
-            clean_token = token.strip(".-_")
-            if len(clean_token) < self.min_entropy_len:
-                continue
+                # Strip typical separators
+                clean_token = token.strip(".-_")
+                if len(clean_token) < self.min_entropy_len:
+                    continue
 
-            entropy = calculate_shannon_entropy(clean_token)
-            if entropy >= self.entropy_threshold:
-                findings.append(
-                    Finding(
-                        type="HIGH_ENTROPY_SECRET",
-                        category=FindingCategory.SECRET,
-                        rule_name="SHANNON_ENTROPY",
-                        safe_preview=make_safe_preview(token, "HIGH_ENTROPY_SECRET"),
-                        start=start,
-                        end=end,
-                        entropy=entropy,
-                        details=f"Entropy: {entropy:.2f} >= {self.entropy_threshold}",
+                entropy = calculate_shannon_entropy(clean_token)
+                if entropy >= self.entropy_threshold:
+                    findings.append(
+                        Finding(
+                            type="HIGH_ENTROPY_SECRET",
+                            category=FindingCategory.SECRET,
+                            rule_name="SHANNON_ENTROPY",
+                            safe_preview=make_safe_preview(token, "HIGH_ENTROPY_SECRET"),
+                            start=start,
+                            end=end,
+                            entropy=entropy,
+                            details=f"Entropy: {entropy:.2f} >= {self.entropy_threshold}",
+                        )
                     )
-                )
-                replacement_spans.append((start, end, "[REDACTED_SECRET]"))
+                    replacement_spans.append((start, end, "[REDACTED_SECRET]"))
 
         # 4. Prompt Injection & Jailbreak Heuristics
         has_prompt_injection = False
@@ -223,19 +225,17 @@ class SecurityDetector:
                 )
                 replacement_spans.append((start, end, "[REDACTED_PROMPT_INJECTION]"))
 
-        # Build sanitized text by applying replacements
-        sanitized_text = self._apply_replacements(text, replacement_spans)
-
         # 5. Policy Decision Evaluation
         non_injection_findings = [
             f for f in findings if f.category != FindingCategory.PROMPT_INJECTION
         ]
 
-        # If prompt injection is found and block_injections is True, block
+        # Prompt injection blocking takes precedence regardless of DLP mode when enabled
         if has_prompt_injection and block_injections:
             action = "BLOCK"
             is_blocked = True
             block_reason = f"Prompt injection detected: {'; '.join(injection_reasons)}"
+            sanitized_text = text
         elif policy_mode == PolicyMode.BLOCK:
             # When block_injections is False, injection findings do NOT cause BLOCK
             if len(non_injection_findings) > 0:
@@ -247,8 +247,14 @@ class SecurityDetector:
                 action = "ALLOW"
                 is_blocked = False
                 block_reason = None
+            sanitized_text = text
         elif policy_mode == PolicyMode.REDACT:
-            action = "REDACT" if len(findings) > 0 else "ALLOW"
+            if len(findings) > 0:
+                action = "REDACT"
+                sanitized_text = self._apply_replacements(text, replacement_spans)
+            else:
+                action = "ALLOW"
+                sanitized_text = text
             is_blocked = False
             block_reason = None
         else:  # PolicyMode.ALLOW

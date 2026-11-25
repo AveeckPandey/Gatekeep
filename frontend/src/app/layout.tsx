@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "GateKeep — Multi-Tenant LLM Security Gateway & Prompt Injection Firewall",
+  title: "GateKeep",
   description:
     "Enterprise-grade security gateway, prompt injection firewall, and deterministic PII redaction proxy for LLMs.",
 };

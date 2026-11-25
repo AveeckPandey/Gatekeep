@@ -194,6 +194,11 @@ export default function AttackPlaygroundPage() {
     aegisgateMeta?.action === "BLOCK" || aegisgateMeta?.is_blocked;
   const isError = responseResult !== null && !responseResult.ok && !isBlocked;
   const isRedacted = responseResult?.ok && aegisgateMeta?.action === "REDACT";
+  const requestFindings = aegisgateMeta?.findings ?? [];
+  const responseFindings = aegisgateMeta?.response_findings ?? [];
+  const requestFindingsCount = aegisgateMeta?.findings_count ?? requestFindings.length;
+  const responseFindingsCount = aegisgateMeta?.response_findings_count ?? responseFindings.length;
+  const totalFindingsCount = requestFindingsCount + responseFindingsCount;
   const rawResponseError = responseResult?.data?.error?.message || responseResult?.data?.detail;
   const responseError = typeof rawResponseError === "string"
     ? rawResponseError
@@ -313,7 +318,7 @@ export default function AttackPlaygroundPage() {
                 <label className="text-xs font-semibold text-slate-300 block mb-1">Server provider alias (optional)</label>
                 <input type="text" value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="Uses workspace policy when empty" className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-slate-200" />
                 <p className="text-[11px] text-slate-400 mt-1">
-                  Leave blank to use the workspace upstream. Aliases work only when configured on the server.
+                  Leave blank to use the workspace upstream. Aliases work only when configured on the server. Upstream providers must support a compatible <code className="font-mono text-slate-300">/chat/completions</code> endpoint with Bearer token auth.
                   {workspacePolicy && <span className="block mt-1">Current upstream: <code className="font-mono text-slate-300 break-all">{workspacePolicy.upstream_base_url}</code>{workspacePolicy.has_upstream_api_key ? " (key configured)" : " (key missing)"}</span>}
                   <Link href="/dashboard/policies" className="text-emerald-400 hover:underline">Configure provider and API key in Firewall Policies</Link>
                 </p>
@@ -413,7 +418,7 @@ export default function AttackPlaygroundPage() {
                           ? responseResult.data?.error?.message || "Security firewall dropped payload"
                           : isError
                           ? responseError
-                          : `${aegisgateMeta?.findings_count || 0} sensitive finding(s) detected`}
+                          : `${totalFindingsCount} sensitive finding(s) detected (${requestFindingsCount} request, ${responseFindingsCount} response)`}
                       </div>
                     </div>
                   </div>
@@ -450,24 +455,36 @@ export default function AttackPlaygroundPage() {
                 )}
 
                 {/* Findings Breakdown */}
-                {aegisgateMeta?.findings && aegisgateMeta.findings.length > 0 && (
-                  <div className="space-y-1.5">
+                {(requestFindings.length > 0 || responseFindings.length > 0) && (
+                  <div className="space-y-3">
                     <span className="text-xs font-semibold text-slate-300 block">
-                      Detected Findings ({aegisgateMeta.findings.length})
+                      Detected Findings ({totalFindingsCount})
                     </span>
-                    <div className="space-y-1">
-                      {aegisgateMeta.findings.map((f: Finding, idx: number) => (
-                        <div
-                          key={idx}
-                          className="p-2 rounded bg-slate-950 border border-slate-800 text-xs flex items-center justify-between"
-                        >
-                          <span className="font-mono text-emerald-400 font-bold">{f.type}</span>
-                          <span className="text-slate-400 text-[11px] font-mono">
-                            Preview: {f.safe_preview}
+                    {[
+                      { label: `Request Findings (${requestFindingsCount})`, items: requestFindings },
+                      { label: `Response Findings (${responseFindingsCount})`, items: responseFindings },
+                    ]
+                      .filter((group) => group.items.length > 0)
+                      .map((group) => (
+                        <div key={group.label} className="space-y-1.5">
+                          <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 block">
+                            {group.label}
                           </span>
+                          <div className="space-y-1">
+                            {group.items.map((f: Finding, idx: number) => (
+                              <div
+                                key={`${group.label}-${idx}`}
+                                className="p-2 rounded bg-slate-950 border border-slate-800 text-xs flex items-center justify-between gap-2"
+                              >
+                                <span className="font-mono text-emerald-400 font-bold">{f.type}</span>
+                                <span className="text-slate-400 text-[11px] font-mono truncate">
+                                  Preview: {f.safe_preview}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       ))}
-                    </div>
                   </div>
                 )}
 
