@@ -26,6 +26,8 @@ export default function ApiKeysPage() {
   const [createdKeyData, setCreatedKeyData] = useState<ApiKeyCreateResponse | null>(null);
   const [copied, setCopied] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [pendingRevokeKeyId, setPendingRevokeKeyId] = useState<string | null>(null);
+  const [isRevoking, setIsRevoking] = useState<boolean>(false);
 
   const loadKeys = useCallback(async () => {
     if (!token || !activeWorkspace) return;
@@ -69,12 +71,15 @@ export default function ApiKeysPage() {
 
   const handleCreateKey = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!token || !activeWorkspace || !newKeyName.trim()) return;
+    if (!token || !activeWorkspace) {
+      setErrorMessage("Workspace is not ready. Refresh the page or sign in again.");
+      return;
+    }
 
     setIsCreating(true);
     setErrorMessage(null);
     try {
-      const resp = await api.createKey(token, activeWorkspace.id, newKeyName.trim());
+      const resp = await api.createKey(token, activeWorkspace.id, newKeyName.trim() || "Gateway Key");
       setCreatedKeyData(resp);
       setNewKeyName("");
       // Cache the full plaintext key in session storage so it can be used in the playground
@@ -93,17 +98,22 @@ export default function ApiKeysPage() {
   };
 
   const handleRevokeKey = async (keyId: string) => {
-    if (!token || !activeWorkspace) return;
-    if (!confirm("Are you sure you want to revoke this Gateway API key? Any applications using it will be blocked immediately.")) {
+    if (!token || !activeWorkspace) {
+      setErrorMessage("Workspace is not ready. Refresh the page or sign in again.");
       return;
     }
 
+    setIsRevoking(true);
+    setErrorMessage(null);
     try {
       await api.revokeKey(token, activeWorkspace.id, keyId);
+      setPendingRevokeKeyId(null);
       await loadKeys();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to revoke key";
-      alert("Failed to revoke key: " + msg);
+      setErrorMessage("Failed to revoke key: " + msg);
+    } finally {
+      setIsRevoking(false);
     }
   };
 
@@ -135,21 +145,20 @@ export default function ApiKeysPage() {
             <h3 className="text-sm font-bold text-slate-100">Create Gateway API Key</h3>
           </div>
           <p className="text-xs text-slate-400 mb-4">
-            Gateway keys (<code className="font-mono text-slate-300">gw_live_...</code>) are hashed with SHA-256 at rest. You will only be able to view the plaintext key once upon generation.
+            Gateway keys (<code className="font-mono text-slate-300">gw_live_...</code>) are hashed with SHA-256 at rest. The name is optional; you will only see the plaintext key once.
           </p>
 
           <form onSubmit={handleCreateKey} className="flex flex-col sm:flex-row gap-3">
             <input
               type="text"
-              required
-              placeholder="Key Name (e.g. Production Service, Staging Backend)"
+              placeholder="Key name (optional, e.g. Production Service)"
               value={newKeyName}
               onChange={(e) => setNewKeyName(e.target.value)}
               className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-emerald-500"
             />
             <button
               type="submit"
-              disabled={isCreating || !newKeyName.trim()}
+              disabled={isCreating}
               className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-50 shrink-0"
             >
               <Plus className="w-4 h-4" />
@@ -215,7 +224,7 @@ export default function ApiKeysPage() {
                       <td className="py-3 text-right">
                         {!k.is_revoked && (
                           <button
-                            onClick={() => handleRevokeKey(k.id)}
+                            onClick={() => setPendingRevokeKeyId(k.id)}
                             className="text-xs text-rose-400 hover:text-rose-300 font-medium px-2 py-1 rounded bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 transition-colors"
                           >
                             Revoke
@@ -229,6 +238,21 @@ export default function ApiKeysPage() {
             </div>
           )}
         </div>
+
+        {pendingRevokeKeyId && (
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4" role="dialog" aria-modal="true" aria-labelledby="revoke-key-title">
+            <div className="bg-slate-900 border border-rose-500/30 rounded-2xl p-6 max-w-md w-full shadow-2xl">
+              <h3 id="revoke-key-title" className="text-base font-bold text-slate-100">Revoke gateway key?</h3>
+              <p className="text-xs text-slate-400 mt-2">Applications using this key will lose access immediately.</p>
+              <div className="flex justify-end gap-3 mt-6">
+                <button type="button" disabled={isRevoking} onClick={() => setPendingRevokeKeyId(null)} className="px-4 py-2 rounded-lg text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-50">Cancel</button>
+                <button type="button" disabled={isRevoking} onClick={() => handleRevokeKey(pendingRevokeKeyId)} className="px-4 py-2 rounded-lg text-xs font-semibold bg-rose-500 text-white hover:bg-rose-400 disabled:opacity-50">
+                  {isRevoking ? "Revoking..." : "Revoke key"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* One-Time Key Display Modal */}
         {createdKeyData && (
