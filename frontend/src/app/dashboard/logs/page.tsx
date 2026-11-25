@@ -186,7 +186,9 @@ export default function AuditLogsPage() {
                                     key={i}
                                     className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] text-slate-300 border border-slate-700"
                                   >
-                                    {f.type}
+                                    {f.type === "PROMPT_INJECTION" && f.rule_name
+                                      ? `Injection: ${f.rule_name.replaceAll("_", " ").toLowerCase()}`
+                                      : f.type}
                                   </span>
                                 ))}
                               </div>
