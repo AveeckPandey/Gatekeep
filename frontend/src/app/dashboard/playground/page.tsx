@@ -51,6 +51,7 @@ interface ProxyResponseState {
   data: {
     choices?: Array<{ message?: { content?: string } }>;
     error?: { message?: string; aegisgate_meta?: AegisGateMeta };
+    detail?: unknown;
     aegisgate_meta?: AegisGateMeta;
     [key: string]: unknown;
   };
@@ -180,8 +181,15 @@ export default function AttackPlaygroundPage() {
     responseResult?.data?.aegisgate_meta || responseResult?.data?.error?.aegisgate_meta;
 
   const isBlocked =
-    responseResult?.status === 403 || aegisgateMeta?.action === "BLOCK" || aegisgateMeta?.is_blocked;
-  const isRedacted = aegisgateMeta?.action === "REDACT";
+    aegisgateMeta?.action === "BLOCK" || aegisgateMeta?.is_blocked;
+  const isError = responseResult !== null && !responseResult.ok && !isBlocked;
+  const isRedacted = responseResult?.ok && aegisgateMeta?.action === "REDACT";
+  const rawResponseError = responseResult?.data?.error?.message || responseResult?.data?.detail;
+  const responseError = typeof rawResponseError === "string"
+    ? rawResponseError
+    : responseResult?.status === 404
+      ? "Model or provider endpoint not found. Check the full model ID and configured upstream URL."
+      : `Request failed with HTTP ${responseResult?.status}.`;
 
   return (
     <div className="flex-1 pb-12">
@@ -285,6 +293,7 @@ export default function AttackPlaygroundPage() {
                   onChange={(e) => setModel(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-slate-200 focus:outline-none focus:border-emerald-500"
                 />
+                <p className="text-[11px] text-slate-500 mt-1">Enter the provider&apos;s full model ID, not a nickname.</p>
               </div>
 
               {/* Prompt Editor */}
@@ -342,7 +351,7 @@ export default function AttackPlaygroundPage() {
                 {/* Status Badge */}
                 <div
                   className={`p-3.5 rounded-xl border flex items-center justify-between ${
-                    isBlocked
+                    isBlocked || isError
                       ? "bg-rose-500/15 border-rose-500/30 text-rose-300"
                       : isRedacted
                       ? "bg-amber-500/15 border-amber-500/30 text-amber-300"
@@ -350,7 +359,7 @@ export default function AttackPlaygroundPage() {
                   }`}
                 >
                   <div className="flex items-center gap-2.5">
-                    {isBlocked ? (
+                    {isBlocked || isError ? (
                       <ShieldAlert className="w-5 h-5 text-rose-400" />
                     ) : (
                       <ShieldCheck className="w-5 h-5 text-emerald-400" />
@@ -358,14 +367,18 @@ export default function AttackPlaygroundPage() {
                     <div>
                       <div className="font-bold text-xs uppercase tracking-wider">
                         {isBlocked
-                          ? `BLOCKED (${responseResult.status} FORBIDDEN)`
+                          ? `BLOCKED BY FIREWALL (HTTP ${responseResult.status})`
+                          : isError
+                          ? `REQUEST FAILED (HTTP ${responseResult.status})`
                           : isRedacted
-                          ? `REDACTED & FORWARDED (${responseResult.status} OK)`
-                          : `ALLOWED & FORWARDED (${responseResult.status} OK)`}
+                          ? `REDACTED & FORWARDED (HTTP ${responseResult.status})`
+                          : `ALLOWED & FORWARDED (HTTP ${responseResult.status})`}
                       </div>
                       <div className="text-[11px] opacity-80 mt-0.5">
                         {isBlocked
                           ? responseResult.data?.error?.message || "Security firewall dropped payload"
+                          : isError
+                          ? responseError
                           : `${aegisgateMeta?.findings_count || 0} sensitive finding(s) detected`}
                       </div>
                     </div>
@@ -442,7 +455,9 @@ export default function AttackPlaygroundPage() {
                     Raw Gateway Response Payload
                   </span>
                   <pre className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-[11px] font-mono text-slate-300 overflow-x-auto max-h-64 leading-tight">
-                    {JSON.stringify(responseResult.data, null, 2)}
+                    {!responseResult.ok && Object.keys(responseResult.data).length === 0
+                      ? "No JSON response body returned."
+                      : JSON.stringify(responseResult.data, null, 2)}
                   </pre>
                 </div>
               </div>
