@@ -17,20 +17,22 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [token, setToken] = useState<string | null>(() => {
-    if (typeof window !== "undefined") {
-      return localStorage.getItem("gatekeep_token");
-    }
-    return null;
-  });
+  const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(() => {
-    if (typeof window !== "undefined") {
-      return Boolean(localStorage.getItem("gatekeep_token"));
-    }
-    return false;
-  });
+  const [isLoading, setIsLoading] = useState(true);
   const router = useRouter();
+
+  useEffect(() => {
+    const savedToken = localStorage.getItem("gatekeep_token");
+    if (!savedToken) {
+      document.cookie = "gatekeep_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+    }
+    // Restore browser-only state after hydration, keeping the server and first client render identical.
+    queueMicrotask(() => {
+      if (savedToken) setToken(savedToken);
+      else setIsLoading(false);
+    });
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -46,6 +48,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .catch(() => {
         if (isMounted) {
           localStorage.removeItem("gatekeep_token");
+          document.cookie = "gatekeep_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
           setToken(null);
           setUser(null);
         }
