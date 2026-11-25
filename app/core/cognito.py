@@ -44,6 +44,14 @@ async def confirm_sign_up(email: str, code: str) -> None:
     )
 
 
+async def resend_confirmation_code(email: str) -> dict:
+    return await asyncio.to_thread(
+        cognito_client().resend_confirmation_code,
+        ClientId=settings.COGNITO_APP_CLIENT_ID,
+        Username=email,
+    )
+
+
 async def authenticate(email: str, password: str) -> dict:
     return await asyncio.to_thread(
         cognito_client().initiate_auth,

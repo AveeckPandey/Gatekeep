@@ -16,11 +16,15 @@ export default function RegisterPage() {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [isResending, setIsResending] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setNotice(null);
 
     if (password !== confirmPassword) {
       setError("Passwords do not match.");
@@ -34,12 +38,53 @@ export default function RegisterPage() {
 
     setIsSubmitting(true);
     try {
-      setConfirmationRequired(await register(email, password));
+      const needsConfirmation = await register(email, password);
+      setConfirmationRequired(needsConfirmation);
+      if (needsConfirmation) {
+        setPassword("");
+        setConfirmPassword("");
+        setNotice(`A confirmation code was sent to ${email}. Check your inbox and spam folder.`);
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Registration failed. Please try again.";
       setError(msg);
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleConfirm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setNotice(null);
+    setIsConfirming(true);
+    try {
+      await api.confirmRegistration(email.trim(), confirmationCode.trim());
+      router.push("/login");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Confirmation failed. Please try again.");
+    } finally {
+      setIsConfirming(false);
+    }
+  };
+
+  const handleResend = async () => {
+    setError(null);
+    setNotice(null);
+    if (!email.trim()) {
+      setError("Enter the email address you used to sign up.");
+      return;
+    }
+    setIsResending(true);
+    try {
+      const result = await api.resendConfirmation(email.trim());
+      setNotice(result.destination
+        ? `A new code was sent to ${result.destination}. Check your inbox and spam folder.`
+        : "A new code was sent. Check your inbox and spam folder.");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Could not resend the code. Please try again.");
+    } finally {
+      setIsResending(false);
     }
   };
 
@@ -67,11 +112,28 @@ export default function RegisterPage() {
           </div>
         )}
 
+        {notice && (
+          <div role="status" className="mb-6 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-200">
+            {notice}
+          </div>
+        )}
+
         {confirmationRequired && (
-          <form onSubmit={async (e) => { e.preventDefault(); setError(null); try { await api.confirmRegistration(email, confirmationCode); router.push("/login"); } catch (err) { setError(err instanceof Error ? err.message : "Confirmation failed"); } }} className="space-y-4 mb-5">
-            <label className="text-xs text-slate-300">Email confirmation code</label>
-            <input value={confirmationCode} onChange={(e) => setConfirmationCode(e.target.value)} required className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200" />
-            <button type="submit" className="mt-3 bg-emerald-500 text-slate-950 px-4 py-2 rounded-lg">Confirm account</button>
+          <form onSubmit={handleConfirm} className="space-y-4 mb-5">
+            <div>
+              <label htmlFor="confirmation-email" className="text-xs text-slate-300">Signup email address</label>
+              <input id="confirmation-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" className="mt-1 w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200" />
+            </div>
+            <div>
+              <label htmlFor="confirmation-code" className="text-xs text-slate-300">Email confirmation code</label>
+              <input id="confirmation-code" value={confirmationCode} onChange={(e) => setConfirmationCode(e.target.value)} required autoComplete="one-time-code" className="mt-1 w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200" />
+            </div>
+            <button type="submit" disabled={isConfirming} className="bg-emerald-500 text-slate-950 px-4 py-2 rounded-lg disabled:opacity-50">
+              {isConfirming ? "Confirming..." : "Confirm account"}
+            </button>
+            <button type="button" onClick={handleResend} disabled={isResending} className="ml-4 text-sm text-emerald-400 hover:text-emerald-300 disabled:opacity-50">
+              {isResending ? "Sending..." : "Resend code"}
+            </button>
           </form>
         )}
         {!confirmationRequired && <form onSubmit={handleSubmit} className="space-y-4">
@@ -133,6 +195,12 @@ export default function RegisterPage() {
             <ArrowRight className="w-4 h-4" />
           </button>
         </form>}
+
+        {!confirmationRequired && (
+          <button type="button" onClick={() => { setError(null); setNotice(null); setConfirmationRequired(true); }} className="mt-5 text-xs text-emerald-400 hover:text-emerald-300">
+            Already signed up? Enter your confirmation code
+          </button>
+        )}
 
         <div className="mt-6 pt-6 border-t border-slate-800/80 text-center">
           <p className="text-xs text-slate-400">

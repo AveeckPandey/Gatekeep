@@ -48,3 +48,33 @@ async def test_cognito_login_does_not_reveal_account_existence(monkeypatch, erro
 
     assert result.value.status_code == 401
     assert result.value.detail == "Invalid email or password"
+
+
+@pytest.mark.asyncio
+async def test_resend_confirmation_returns_masked_delivery_destination(monkeypatch):
+    monkeypatch.setattr(settings, "AUTH_BACKEND", "cognito")
+
+    async def resend(_email):
+        return {"CodeDeliveryDetails": {"Destination": "a***@e***.com", "DeliveryMedium": "EMAIL"}}
+
+    monkeypatch.setattr(cognito, "resend_confirmation_code", resend)
+    response = await auth.resend_confirmation(auth.ResendConfirmationRequest(email="pending@example.com"))
+
+    assert response == {
+        "message": "A new confirmation code was sent.",
+        "destination": "a***@e***.com",
+    }
+
+
+@pytest.mark.asyncio
+async def test_resend_confirmation_reports_cognito_throttling(monkeypatch):
+    monkeypatch.setattr(settings, "AUTH_BACKEND", "cognito")
+
+    async def throttled(_email):
+        raise ClientError({"Error": {"Code": "LimitExceededException", "Message": "Limit exceeded"}}, "ResendConfirmationCode")
+
+    monkeypatch.setattr(cognito, "resend_confirmation_code", throttled)
+    with pytest.raises(HTTPException) as result:
+        await auth.resend_confirmation(auth.ResendConfirmationRequest(email="pending@example.com"))
+
+    assert result.value.status_code == 429

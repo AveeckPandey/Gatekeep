@@ -38,6 +38,29 @@ class ConfirmRequest(BaseModel):
     code: str
 
 
+class ResendConfirmationRequest(BaseModel):
+    email: EmailStr
+
+
+@router.post("/resend-confirmation")
+async def resend_confirmation(payload: ResendConfirmationRequest):
+    if settings.AUTH_BACKEND != "cognito":
+        raise HTTPException(status_code=404, detail="Cognito authentication is not configured")
+    try:
+        result = await cognito.resend_confirmation_code(str(payload.email))
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        if code in {"LimitExceededException", "TooManyRequestsException"}:
+            raise HTTPException(status_code=429, detail="Please wait before requesting another code.") from exc
+        if code == "CodeDeliveryFailureException":
+            raise HTTPException(status_code=502, detail="Cognito could not deliver the email. Please try again later.") from exc
+        raise HTTPException(status_code=400, detail="Could not resend a confirmation code for this account.") from exc
+    return {
+        "message": "A new confirmation code was sent.",
+        "destination": result.get("CodeDeliveryDetails", {}).get("Destination"),
+    }
+
+
 @router.post("/confirm")
 async def confirm_registration(payload: ConfirmRequest):
     if settings.AUTH_BACKEND != "cognito":

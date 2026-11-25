@@ -191,6 +191,12 @@ export const api = {
       body: JSON.stringify({ email, code }),
     }),
 
+  resendConfirmation: (email: string) =>
+    request<{ message: string; destination: string | null }>("/api/auth/resend-confirmation", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+
   login: (email: string, password: string) =>
     request<TokenResponse>("/api/auth/login", {
       method: "POST",
