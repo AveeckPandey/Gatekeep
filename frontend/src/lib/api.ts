@@ -153,7 +153,19 @@ async function request<T>(
     headers["Authorization"] = `Bearer ${token}`;
   }
 
-  const response = await fetch(url, { ...options, headers });
+  let response: Response;
+  try {
+    response = await fetch(url, { ...options, headers });
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error(
+        process.env.NODE_ENV === "development"
+          ? "Cannot reach the GateKeep API. Start the backend and check NEXT_PUBLIC_API_URL."
+          : "Cannot reach the GateKeep API. Please try again shortly."
+      );
+    }
+    throw error;
+  }
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
