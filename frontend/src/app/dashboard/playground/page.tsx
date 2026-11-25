@@ -18,7 +18,7 @@ import {
 import { Header } from "@/components/Header";
 import { useAuth } from "@/context/AuthContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
-import { api, ApiKey, AegisGateMeta, Finding } from "@/lib/api";
+import { api, ApiKey, AegisGateMeta, Finding, Policy } from "@/lib/api";
 
 const PRESETS = [
   {
@@ -74,6 +74,7 @@ export default function AttackPlaygroundPage() {
   });
   const [model, setModel] = useState<string>("");
   const [provider, setProvider] = useState<string>("");
+  const [workspacePolicy, setWorkspacePolicy] = useState<Policy | null>(null);
   const [promptText, setPromptText] = useState<string>(PRESETS[0].text);
 
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -114,6 +115,19 @@ export default function AttackPlaygroundPage() {
     return () => {
       isMounted = false;
     };
+  }, [token, activeWorkspace]);
+
+  useEffect(() => {
+    let isMounted = true;
+    if (!token || !activeWorkspace) return;
+    api.getPolicy(token, activeWorkspace.id)
+      .then((policy) => {
+        if (isMounted) setWorkspacePolicy(policy);
+      })
+      .catch(() => {
+        if (isMounted) setWorkspacePolicy(null);
+      });
+    return () => { isMounted = false; };
   }, [token, activeWorkspace]);
 
   const handleSelectKey = (k: ApiKey) => {
@@ -296,8 +310,13 @@ export default function AttackPlaygroundPage() {
 
               {/* Target Model */}
               <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">Provider alias (optional)</label>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">Server provider alias (optional)</label>
                 <input type="text" value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="Uses workspace policy when empty" className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-slate-200" />
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Leave blank to use the workspace upstream. Aliases work only when configured on the server.
+                  {workspacePolicy && <span className="block mt-1">Current upstream: <code className="font-mono text-slate-300 break-all">{workspacePolicy.upstream_base_url}</code>{workspacePolicy.has_upstream_api_key ? " (key configured)" : " (key missing)"}</span>}
+                  <Link href="/dashboard/policies" className="text-emerald-400 hover:underline">Configure provider and API key in Firewall Policies</Link>
+                </p>
               </div>
               <div>
                 <label className="text-xs font-semibold text-slate-300 block mb-1">Target Model</label>

@@ -23,7 +23,7 @@ export function middleware(request: NextRequest) {
 
   // Root redirect
   if (pathname === "/") {
-    const destination = token ? "/dashboard" : "/login";
+    const destination = token ? "/dashboard" : "/overview";
     return NextResponse.redirect(new URL(destination, request.url));
   }
 

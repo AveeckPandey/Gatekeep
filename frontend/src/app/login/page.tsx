@@ -134,6 +134,9 @@ export default function LoginPage() {
               Create a tenant account
             </Link>
           </p>
+          <Link href="/overview" className="mt-3 inline-block text-xs font-medium text-slate-300 hover:text-emerald-400">
+            What does GateKeep do? See the overview →
+          </Link>
         </div>
       </div>
     </div>

@@ -14,7 +14,7 @@ export default function HomePage() {
       if (token) {
         router.replace("/dashboard");
       } else {
-        router.replace("/login");
+        router.replace("/overview");
       }
     }
   }, [token, isLoading, router]);

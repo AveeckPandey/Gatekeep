@@ -82,6 +82,57 @@ export default function DashboardOverviewPage() {
       />
 
       <div className="max-w-7xl mx-auto px-8 py-6 space-y-6">
+        <section className="rounded-2xl border border-emerald-500/20 bg-gradient-to-br from-emerald-950/40 via-slate-900 to-slate-900 p-6 md:p-8">
+          <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-emerald-400">What GateKeep does</p>
+          <h2 className="mt-2 max-w-3xl text-2xl font-bold text-slate-100">A security checkpoint between your app and an AI model</h2>
+          <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
+            Send chat requests to GateKeep instead of directly to your model provider. It checks prompts for sensitive data and prompt injection, applies your firewall policy, forwards permitted requests, optionally checks model responses, and records the result in audit logs.
+          </p>
+          <div className="mt-5 flex flex-wrap gap-3">
+            <Link href="/dashboard/policies" className="rounded-lg bg-emerald-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-emerald-400">Set up provider and policy</Link>
+            <Link href="/dashboard/playground" className="rounded-lg border border-slate-700 px-4 py-2 text-xs font-semibold text-slate-200 hover:bg-slate-800">Try a request</Link>
+          </div>
+        </section>
+
+        <section aria-labelledby="request-flow-title" className="space-y-3">
+          <div>
+            <h2 id="request-flow-title" className="text-base font-bold text-slate-100">How a request moves through GateKeep</h2>
+            <p className="mt-1 text-xs text-slate-400">The same flow applies to the playground and to applications calling the gateway API.</p>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            {[
+              { number: "01", title: "Authenticate", description: "Your app sends a chat request with a workspace gateway key (gw_live_...)." },
+              { number: "02", title: "Inspect the prompt", description: "GateKeep scans for secrets, personal data, and prompt injection patterns, then blocks, redacts, or allows the request according to your policy." },
+              { number: "03", title: "Call the model", description: "Permitted requests go to the configured OpenAI compatible provider using its separate, encrypted provider key." },
+              { number: "04", title: "Check and log", description: "When response inspection is enabled, GateKeep checks model output for sensitive data. It returns the result and writes an audit entry." },
+            ].map((step) => (
+              <div key={step.number} className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+                <span className="font-mono text-xs font-bold text-emerald-400">{step.number}</span>
+                <h3 className="mt-2 text-sm font-semibold text-slate-100">{step.title}</h3>
+                <p className="mt-1 text-xs leading-5 text-slate-400">{step.description}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section aria-labelledby="getting-started-title" className="rounded-xl border border-slate-800 bg-slate-900/70 p-5">
+          <h2 id="getting-started-title" className="text-base font-bold text-slate-100">Get started</h2>
+          <div className="mt-4 grid gap-4 md:grid-cols-3">
+            <div>
+              <Link href="/dashboard/policies" className="text-xs font-semibold text-emerald-400 hover:underline">1. Connect a model provider →</Link>
+              <p className="mt-1 text-xs leading-5 text-slate-400">Set its chat completions base URL and provider API key in Firewall Policies. Choose what GateKeep blocks or redacts.</p>
+            </div>
+            <div>
+              <Link href="/dashboard/keys" className="text-xs font-semibold text-emerald-400 hover:underline">2. Create a gateway key →</Link>
+              <p className="mt-1 text-xs leading-5 text-slate-400">Create a gw_live_ key for this workspace and save the full value. This key authenticates requests to GateKeep; it is different from the provider key.</p>
+            </div>
+            <div>
+              <Link href="/dashboard/playground" className="text-xs font-semibold text-emerald-400 hover:underline">3. Test and review →</Link>
+              <p className="mt-1 text-xs leading-5 text-slate-400">Send a safe or attack prompt in the playground, see the firewall verdict, then inspect the request in Audit Logs.</p>
+            </div>
+          </div>
+        </section>
+
         {/* Top Security Status Banner */}
         <div className="bg-gradient-to-r from-emerald-950/40 via-slate-900 to-slate-900 border border-emerald-500/20 rounded-xl p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
           <div className="flex items-center gap-3.5">
@@ -91,7 +142,7 @@ export default function DashboardOverviewPage() {
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-sm font-semibold text-slate-100">
-                  Firewall Mode: {policy?.mode || "REDACT"}
+                  Firewall Mode: {policy?.mode || (isLoading ? "Loading..." : "Unavailable")}
                 </h3>
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 font-semibold border border-emerald-500/20">
                   ACTIVE
@@ -100,11 +151,11 @@ export default function DashboardOverviewPage() {
               <p className="text-xs text-slate-400 mt-0.5">
                 Upstream LLM:{" "}
                 <span className="font-mono text-slate-300">
-                  {policy?.upstream_base_url || "https://integrate.api.nvidia.com/v1"}
+                  {policy?.upstream_base_url || (isLoading ? "Loading workspace policy" : "Unavailable")}
                 </span>{" "}
                 • BYOK Key:{" "}
                 <span className="text-slate-300">
-                  {policy?.has_upstream_api_key ? "Encrypted at Rest (AES-256-GCM)" : "Not Configured"}
+                  {policy?.has_upstream_api_key ? "Encrypted at rest" : policy ? "Not configured" : "Unknown"}
                 </span>
               </p>
             </div>
@@ -133,13 +184,13 @@ export default function DashboardOverviewPage() {
           {/* Card 1: Total Requests */}
           <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-lg">
             <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wider">Total Requests</span>
+              <span className="text-xs font-semibold uppercase tracking-wider">Recent Requests</span>
               <Activity className="w-4 h-4 text-slate-400" />
             </div>
             <div className="text-2xl font-bold text-slate-100 font-mono">
               {totalRequests.toLocaleString()}
             </div>
-            <div className="text-[11px] text-slate-500 mt-1">In-line proxy inspections</div>
+            <div className="text-[11px] text-slate-500 mt-1">Latest {Math.min(totalRequests, 50)} logged inspections</div>
           </div>
 
           {/* Card 2: Blocked Attacks */}
@@ -171,7 +222,7 @@ export default function DashboardOverviewPage() {
               <Zap className="w-4 h-4 text-cyan-400" />
             </div>
             <div className="text-2xl font-bold text-cyan-400 font-mono">{avgInspectionMs} ms</div>
-            <div className="text-[11px] text-slate-500 mt-1">Inspection overhead (sub-ms)</div>
+            <div className="text-[11px] text-slate-500 mt-1">Average inspection time in recent logs</div>
           </div>
         </div>
 
@@ -184,7 +235,7 @@ export default function DashboardOverviewPage() {
             <div className="flex-1">
               <h4 className="text-sm font-semibold text-slate-200">Firewall Rules & BYOK</h4>
               <p className="text-xs text-slate-400 mt-1">
-                Configure deterministic PII masking, Shannon entropy thresholds, and NVIDIA Nemotron API credentials.
+                Configure request inspection, prompt injection defenses, and credentials for your model provider.
               </p>
               <Link
                 href="/dashboard/policies"

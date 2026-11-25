@@ -9,6 +9,8 @@ import {
   Check,
   AlertTriangle,
   RefreshCw,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { Header } from "@/components/Header";
 import { useAuth } from "@/context/AuthContext";
@@ -25,9 +27,27 @@ export default function ApiKeysPage() {
   const [newKeyName, setNewKeyName] = useState<string>("");
   const [createdKeyData, setCreatedKeyData] = useState<ApiKeyCreateResponse | null>(null);
   const [copied, setCopied] = useState<boolean>(false);
+  const [cachedKeys, setCachedKeys] = useState<Record<string, string>>({});
+  const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({});
+  const [showCreatedKey, setShowCreatedKey] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [pendingRevokeKeyId, setPendingRevokeKeyId] = useState<string | null>(null);
   const [isRevoking, setIsRevoking] = useState<boolean>(false);
+
+  const updateCachedKeys = useCallback((list: ApiKey[]) => {
+    const available: Record<string, string> = {};
+    const latest = sessionStorage.getItem("gatekeep_latest_key");
+    const latestPrefix = sessionStorage.getItem("gatekeep_latest_key_prefix");
+    for (const key of list) {
+      if (key.is_revoked) continue;
+      const value = sessionStorage.getItem("gatekeep_active_key_" + key.id) ||
+        (key.prefix === latestPrefix ? latest : null);
+      if (value && /^gw_live_[A-Za-z0-9]{32}$/.test(value)) {
+        available[key.id] = value;
+      }
+    }
+    setCachedKeys(available);
+  }, []);
 
   const loadKeys = useCallback(async () => {
     if (!token || !activeWorkspace) return;
@@ -36,13 +56,14 @@ export default function ApiKeysPage() {
     try {
       const list = await api.listKeys(token, activeWorkspace.id);
       setKeys(list);
+      updateCachedKeys(list);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to load keys";
       setErrorMessage(msg);
     } finally {
       setIsLoading(false);
     }
-  }, [token, activeWorkspace]);
+  }, [token, activeWorkspace, updateCachedKeys]);
 
   useEffect(() => {
     let isMounted = true;
@@ -53,6 +74,7 @@ export default function ApiKeysPage() {
       .then((list) => {
         if (!isMounted) return;
         setKeys(list);
+        updateCachedKeys(list);
       })
       .catch((err: unknown) => {
         if (!isMounted) return;
@@ -67,10 +89,15 @@ export default function ApiKeysPage() {
     return () => {
       isMounted = false;
     };
-  }, [token, activeWorkspace]);
+  }, [token, activeWorkspace, updateCachedKeys]);
 
   const handleCreateKey = async (e: React.FormEvent) => {
     e.preventDefault();
+    const label = newKeyName.trim();
+    if (label.length >= 40 && !/\s/.test(label)) {
+      setErrorMessage("This looks like an API credential. Use a short label here and enter provider keys under Firewall Policies.");
+      return;
+    }
     if (!token || !activeWorkspace) {
       setErrorMessage("Workspace is not ready. Refresh the page or sign in again.");
       return;
@@ -79,8 +106,9 @@ export default function ApiKeysPage() {
     setIsCreating(true);
     setErrorMessage(null);
     try {
-      const resp = await api.createKey(token, activeWorkspace.id, newKeyName.trim() || "Gateway Key");
+      const resp = await api.createKey(token, activeWorkspace.id, label || "Gateway Key");
       setCreatedKeyData(resp);
+      setShowCreatedKey(false);
       setNewKeyName("");
       // Cache the full plaintext key in session storage so it can be used in the playground
       if (typeof window !== "undefined") {
@@ -107,6 +135,8 @@ export default function ApiKeysPage() {
     setErrorMessage(null);
     try {
       await api.revokeKey(token, activeWorkspace.id, keyId);
+      sessionStorage.removeItem("gatekeep_active_key_" + keyId);
+      setVisibleKeys((current) => ({ ...current, [keyId]: false }));
       setPendingRevokeKeyId(null);
       await loadKeys();
     } catch (err: unknown) {
@@ -145,7 +175,7 @@ export default function ApiKeysPage() {
             <h3 className="text-sm font-bold text-slate-100">Create Gateway API Key</h3>
           </div>
           <p className="text-xs text-slate-400 mb-4">
-            Gateway keys (<code className="font-mono text-slate-300">gw_live_...</code>) are hashed with SHA-256 at rest. The name is optional; you will only see the plaintext key once.
+            Gateway keys (<code className="font-mono text-slate-300">gw_live_...</code>) are hashed with SHA-256 at rest. The name is only a label; enter provider credentials under Firewall Policies, never as a key name. A full gateway key remains viewable only in the browser session where it was created.
           </p>
 
           <form onSubmit={handleCreateKey} className="flex flex-col sm:flex-row gap-3">
@@ -202,8 +232,15 @@ export default function ApiKeysPage() {
                 <tbody className="divide-y divide-slate-800/60">
                   {keys.map((k) => (
                     <tr key={k.id} className="hover:bg-slate-800/20 transition-colors">
-                      <td className="py-3 font-semibold text-slate-200">{k.name}</td>
-                      <td className="py-3 font-mono text-slate-400">{k.prefix}</td>
+                      <td className="py-3 font-semibold text-slate-200">
+                        {k.name.length > 32 && !/\s/.test(k.name) ? "Credential-like name hidden" : k.name}
+                      </td>
+                      <td className="py-3 font-mono text-slate-400">
+                        <span className="block">{k.prefix}</span>
+                        {cachedKeys[k.id] && visibleKeys[k.id] && (
+                          <code className="block mt-1 text-emerald-300 break-all select-all">{cachedKeys[k.id]}</code>
+                        )}
+                      </td>
                       <td className="py-3">
                         <span
                           className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider uppercase ${
@@ -222,6 +259,17 @@ export default function ApiKeysPage() {
                         {k.last_used_at ? new Date(k.last_used_at).toLocaleString() : "Never"}
                       </td>
                       <td className="py-3 text-right">
+                        <button
+                          type="button"
+                          disabled={!cachedKeys[k.id]}
+                          onClick={() => setVisibleKeys((current) => ({ ...current, [k.id]: !current[k.id] }))}
+                          aria-label={visibleKeys[k.id] ? "Hide full gateway key" : "Show full gateway key"}
+                          title={cachedKeys[k.id] ? "Full gateway key saved in this browser session" : "Full key unavailable after the creation session; create a new key"}
+                          className="text-xs text-slate-300 hover:text-white font-medium px-2 py-1 mr-2 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1"
+                        >
+                          {visibleKeys[k.id] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                          {visibleKeys[k.id] ? "Hide" : "Show"}
+                        </button>
                         {!k.is_revoked && (
                           <button
                             onClick={() => setPendingRevokeKeyId(k.id)}
@@ -236,6 +284,11 @@ export default function ApiKeysPage() {
                 </tbody>
               </table>
             </div>
+          )}
+          {keys.length > 0 && (
+            <p className="mt-3 text-[11px] text-slate-500">
+              Show is available only for full keys saved in this browser session. The server stores only key hashes and cannot recover an older full key.
+            </p>
           )}
         </div>
 
@@ -271,7 +324,7 @@ export default function ApiKeysPage() {
               <div className="p-3.5 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-300 text-xs mb-4 flex items-start gap-2.5">
                 <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
                 <span>
-                  Please copy your key now. For your security, this key is stored strictly as a SHA-256 hash and cannot be displayed again.
+                  Copy your key now. It is stored on the server only as a SHA-256 hash. You can show it again in this browser session; after the session ends, create a new key if you need a full value.
                 </span>
               </div>
 
@@ -279,11 +332,19 @@ export default function ApiKeysPage() {
                 <label className="text-xs text-slate-400 block mb-1">Plaintext API Key</label>
                 <div className="flex items-center gap-2">
                   <input
-                    type="text"
+                    type={showCreatedKey ? "text" : "password"}
                     readOnly
                     value={createdKeyData.api_key}
                     className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2.5 text-xs font-mono text-emerald-300 select-all focus:outline-none"
                   />
+                  <button
+                    type="button"
+                    onClick={() => setShowCreatedKey((shown) => !shown)}
+                    aria-label={showCreatedKey ? "Hide new gateway key" : "Show new gateway key"}
+                    className="p-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
+                  >
+                    {showCreatedKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                   <button
                     onClick={() => copyToClipboard(createdKeyData.api_key)}
                     className="px-4 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-xs flex items-center gap-1.5 transition-colors shrink-0"
