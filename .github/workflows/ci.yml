@@ -44,7 +44,7 @@ jobs:
           ENV: development
           ENABLE_DEMO_ENDPOINT: "true"
         run: |
-          pytest -v
+          python -m pytest -v
 
   frontend-build:
     name: Frontend Lint & Production Build
