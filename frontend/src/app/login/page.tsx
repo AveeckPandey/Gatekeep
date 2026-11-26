@@ -106,6 +106,10 @@ export default function LoginPage() {
           </button>
         </form>
 
+        <Link href="/forgot-password" className="mt-4 inline-block text-xs font-medium text-emerald-400 hover:text-emerald-300">
+          Forgot your password?
+        </Link>
+
         {/* Recruiter / Quick Demo Access */}
         {process.env.NEXT_PUBLIC_ENABLE_DEMO === "true" && <div className="mt-5 pt-5 border-t border-slate-800">
           <div className="text-center mb-2.5">

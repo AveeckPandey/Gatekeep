@@ -78,3 +78,49 @@ async def test_resend_confirmation_reports_cognito_throttling(monkeypatch):
         await auth.resend_confirmation(auth.ResendConfirmationRequest(email="pending@example.com"))
 
     assert result.value.status_code == 429
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_code", [None, "UserNotFoundException", "InvalidParameterException", "NotAuthorizedException"])
+async def test_password_reset_request_does_not_disclose_account_existence(monkeypatch, error_code):
+    monkeypatch.setattr(settings, "AUTH_BACKEND", "cognito")
+
+    async def forgot(email):
+        assert email == "test@example.com"
+        if error_code:
+            raise ClientError({"Error": {"Code": error_code}}, "ForgotPassword")
+        return {"CodeDeliveryDetails": {"Destination": "t***@e***"}}
+
+    monkeypatch.setattr(cognito, "forgot_password", forgot)
+    result = await auth.forgot_password(auth.ResendConfirmationRequest(email="TEST@example.com"))
+    assert result == {"message": "If this email belongs to a verified account, a password reset code has been sent. Check your inbox and spam folder."}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_code,status", [("CodeMismatchException", 400), ("ExpiredCodeException", 400),
+    ("UserNotFoundException", 400), ("InvalidPasswordException", 400), ("TooManyRequestsException", 429)])
+async def test_password_reset_handles_invalid_codes_and_throttling(monkeypatch, error_code, status):
+    monkeypatch.setattr(settings, "AUTH_BACKEND", "cognito")
+
+    async def reset(email, code, password):
+        raise ClientError({"Error": {"Code": error_code}}, "ConfirmForgotPassword")
+
+    monkeypatch.setattr(cognito, "confirm_forgot_password", reset)
+    with pytest.raises(HTTPException) as result:
+        await auth.reset_password(auth.ResetPasswordRequest(email="test@example.com", code="123456", password="SafePassword7!"))
+    assert result.value.status_code == status
+    assert error_code not in result.value.detail
+
+
+@pytest.mark.asyncio
+async def test_password_reset_uses_cognito_code_and_new_password(monkeypatch):
+    monkeypatch.setattr(settings, "AUTH_BACKEND", "cognito")
+    calls = []
+
+    async def reset(email, code, password):
+        calls.append((email, code, password))
+
+    monkeypatch.setattr(cognito, "confirm_forgot_password", reset)
+    result = await auth.reset_password(auth.ResetPasswordRequest(email="TEST@example.com", code="012345", password="SafePassword7!"))
+    assert calls == [("test@example.com", "012345", "SafePassword7!")]
+    assert "Password updated" in result["message"]

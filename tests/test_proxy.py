@@ -576,3 +576,59 @@ async def test_proxy_unknown_provider_alias_logs_single_error_audit(async_client
     assert len(logs) == 1
     assert logs[0].action == "ERROR"
     assert "Unknown upstream provider" in (logs[0].block_reason or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("secret_key", ["AKIAIOSFODNN7EXAMPLE", "9b7d3f82a1c4e650d8f2b3a4c5e6f7a8"])
+@pytest.mark.parametrize("mode,expected_status,expected_action", [
+    (PolicyMode.REDACT, 400, "ERROR"),
+    (PolicyMode.BLOCK, 403, "BLOCK"),
+    (PolicyMode.ALLOW, 200, "ALLOW"),
+])
+@respx.mock
+async def test_tool_schema_property_names_are_inspected(
+    async_client, secret_key, mode, expected_status, expected_action
+):
+    ws_id, api_key, _, _ = await _setup_workspace_and_key(async_client, mode=mode)
+    route = respx.post("https://integrate.api.nvidia.com/v1/chat/completions").respond(
+        200, json={"choices": [{"message": {"content": "Hello"}}]})
+    response = await async_client.post("/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={"model": "test-model", "messages": [{"role": "user", "content": "Hello"}],
+              "tools": [{"type": "function", "function": {"name": "lookup",
+                  "parameters": {"type": "object", "properties": {secret_key: {"type": "string"}},
+                                 "required": [secret_key]}}}]})
+    assert response.status_code == expected_status
+    assert route.called == (mode == PolicyMode.ALLOW)
+    if mode == PolicyMode.ALLOW:
+        forwarded = json.loads(route.calls.last.request.content)
+        schema = forwarded["tools"][0]["function"]["parameters"]
+        assert secret_key in schema["properties"]
+        assert schema["required"] == [secret_key]
+    else:
+        assert secret_key not in response.text
+    logs = await repo.list_audit_logs_for_workspace(ws_id)
+    assert len(logs) == 1 and logs[0].action == expected_action
+    assert logs[0].findings_count > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("location", ["request", "message", "metadata"])
+@respx.mock
+async def test_sensitive_extra_property_names_are_not_forwarded(async_client, location):
+    ws_id, api_key, _, _ = await _setup_workspace_and_key(async_client, mode=PolicyMode.REDACT)
+    route = respx.post("https://integrate.api.nvidia.com/v1/chat/completions").respond(
+        200, json={"choices": [{"message": {"content": "Hello"}}]})
+    payload = {"model": "test-model", "messages": [{"role": "user", "content": "Hello"}]}
+    target = payload if location == "request" else payload["messages"][0]
+    if location == "metadata":
+        target["metadata"] = {}
+        target = target["metadata"]
+    target["AKIAIOSFODNN7EXAMPLE"] = "ordinary value"
+    response = await async_client.post("/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"}, json=payload)
+    assert response.status_code == 400
+    assert not route.called
+    assert "AKIAIOSFODNN7EXAMPLE" not in response.text
+    logs = await repo.list_audit_logs_for_workspace(ws_id)
+    assert len(logs) == 1 and logs[0].action == "ERROR" and logs[0].findings_count > 0

@@ -59,3 +59,21 @@ async def authenticate(email: str, password: str) -> dict:
         AuthFlow="USER_PASSWORD_AUTH",
         AuthParameters={"USERNAME": email, "PASSWORD": password},
     )
+
+
+async def forgot_password(email: str) -> dict:
+    return await asyncio.to_thread(
+        cognito_client().forgot_password,
+        ClientId=settings.COGNITO_APP_CLIENT_ID,
+        Username=email,
+    )
+
+
+async def confirm_forgot_password(email: str, code: str, password: str) -> None:
+    await asyncio.to_thread(
+        cognito_client().confirm_forgot_password,
+        ClientId=settings.COGNITO_APP_CLIENT_ID,
+        Username=email,
+        ConfirmationCode=code,
+        Password=password,
+    )

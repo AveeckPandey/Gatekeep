@@ -10,6 +10,115 @@ from app.models.policy import PolicyMode
 from app.repositories.in_memory import repo
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wire_format", ["no_space", "multiline", "bom_comments"])
+@respx.mock
+async def test_sse_wire_formats_cannot_bypass_dlp(async_client, wire_format):
+    """Equivalent SSE encodings must receive exactly the same security checks."""
+    ws_id, api_key, _ = await _setup_tenant(async_client)
+    data = json.dumps({"choices": [{"index": 0, "delta": {
+        "content": "AWS key: AKIAIOSFODNN7EXAMPLE"}}]})
+    if wire_format == "no_space":
+        wire = f"data:{data}\n\ndata:[DONE]\n\n"
+    elif wire_format == "multiline":
+        wire = 'data: {\r\ndata: ' + data[1:] + '\r\n\r\ndata: [DONE]\r\n\r\n'
+    else:
+        wire = '\ufeff: heartbeat\nevent: message\nid: 1\nretry: 1000\n' + f"data:{data}\n\ndata:[DONE]\n\n"
+    respx.post("https://integrate.api.nvidia.com/v1/chat/completions").respond(
+        200, text=wire, headers={"content-type": "text/event-stream"})
+    response = await async_client.post("/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={"model": "test-model", "stream": True,
+              "messages": [{"role": "user", "content": "Hello"}]})
+    assert response.status_code == 200
+    assert "AKIAIOSFODNN7EXAMPLE" not in response.text
+    assert "[REDACTED_AWS_KEY]" in response.text
+    assert response.text.count("data: [DONE]") == 1
+    logs = await repo.list_audit_logs_for_workspace(ws_id)
+    assert len(logs) == 1 and logs[0].action == "REDACT"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wire", [
+    'data:{"error":{"message":"Provider failed AKIAIOSFODNN7EXAMPLE"}}\n\n',
+    'data: {invalid JSON AKIAIOSFODNN7EXAMPLE}\n\n',
+    'data: []\n\n',
+    'data: {"choices":[{"index":0,"delta":{"content":"unfinished"}}]}\n\n',
+    'data: {"choices":[{"index":0,"delta":{"content":"unfinished"}}]}',
+    ': heartbeat only\n\n',
+    'data: [DONE]\n\n',
+])
+@respx.mock
+async def test_stream_failure_emits_error_and_exactly_one_error_audit(async_client, wire):
+    ws_id, api_key, _ = await _setup_tenant(async_client)
+    respx.post("https://integrate.api.nvidia.com/v1/chat/completions").respond(
+        200, text=wire, headers={"content-type": "text/event-stream"})
+    response = await async_client.post("/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={"model": "test-model", "stream": True,
+              "messages": [{"role": "user", "content": "Hello"}]})
+    # Headers have already been sent; errors must be explicit SSE error payloads.
+    assert response.status_code == 200
+    events = [json.loads(line[6:]) for line in response.text.splitlines()
+              if line.startswith("data: ") and line != "data: [DONE]"]
+    assert len([event for event in events if "error" in event]) == 1
+    assert "AKIAIOSFODNN7EXAMPLE" not in response.text
+    assert "unfinished" not in response.text
+    assert response.text.count("data: [DONE]") == 1
+    logs = await repo.list_audit_logs_for_workspace(ws_id)
+    assert len(logs) == 1 and logs[0].action == "ERROR"
+    assert "AKIAIOSFODNN7EXAMPLE" not in (logs[0].block_reason or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [
+    [], None, {}, {"choices": []}, {"choices": [None]},
+    {"error": {"message": "Provider failed"}},
+    {"choices": [{"message": {"content": "Hello"}}], "usage": []},
+    {"choices": [{"message": {"content": "Hello"}}], "usage": {"prompt_tokens": "bad"}},
+    {"choices": [{"message": {"content": {"invalid": "shape"}}}]},
+    {"choices": [{"message": {"tool_calls": [{"function": {"arguments": []}}]}}]},
+    {"choices": [{"message": {"content": "Hello"}}], "custom_score": float("nan")},
+    {"choices": [{"message": {"content": [{"type": "text", "text": "Hello",
+        "annotations": {"AKIAIOSFODNN7EXAMPLE": "value"}}]}}]},
+])
+@respx.mock
+async def test_invalid_success_body_returns_502_and_one_error_audit(async_client, body):
+    ws_id, api_key, _ = await _setup_tenant(async_client)
+    respx.post("https://integrate.api.nvidia.com/v1/chat/completions").respond(
+        200, text=json.dumps(body), headers={"content-type": "application/json"})
+    response = await async_client.post("/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={"model": "test-model", "messages": [{"role": "user", "content": "Hello"}]})
+    assert response.status_code == 502
+    logs = await repo.list_audit_logs_for_workspace(ws_id)
+    assert len(logs) == 1 and logs[0].action == "ERROR"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy", [False, True])
+@respx.mock
+async def test_nonstream_tool_identifiers_are_preserved(async_client, legacy):
+    ws_id, api_key, _ = await _setup_tenant(async_client)
+    function = {"name": "get_customer_billing_information",
+                "arguments": '{"email":"secret@corp.com"}'}
+    message = {"content": None}
+    message.update({"function_call": function} if legacy else {
+        "tool_calls": [{"id": "call_1", "type": "function", "function": function}]})
+    respx.post("https://integrate.api.nvidia.com/v1/chat/completions").respond(
+        200, json={"choices": [{"message": message}]})
+    response = await async_client.post("/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={"model": "test-model", "messages": [{"role": "user", "content": "Hello"}]})
+    assert response.status_code == 200
+    returned = response.json()["choices"][0]["message"]
+    result = returned["function_call"] if legacy else returned["tool_calls"][0]["function"]
+    assert result["name"] == function["name"]
+    assert result["arguments"] == '{"email":"[REDACTED_EMAIL]"}'
+    logs = await repo.list_audit_logs_for_workspace(ws_id)
+    assert len(logs) == 1 and logs[0].action == "REDACT"
+
+
 async def _setup_tenant(
     async_client: AsyncClient,
     mode: PolicyMode = PolicyMode.REDACT,

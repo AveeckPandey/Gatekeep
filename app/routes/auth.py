@@ -7,7 +7,7 @@ from typing import Dict, List
 
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 from app.config import settings
 from app.core import cognito
@@ -40,6 +40,42 @@ class ConfirmRequest(BaseModel):
 
 class ResendConfirmationRequest(BaseModel):
     email: EmailStr
+
+
+class ResetPasswordRequest(UserRegisterRequest):
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+@router.post("/forgot-password")
+async def forgot_password(payload: ResendConfirmationRequest):
+    if settings.AUTH_BACKEND != "cognito":
+        raise HTTPException(status_code=404, detail="Password recovery requires Cognito authentication")
+    try:
+        await cognito.forgot_password(str(payload.email).lower())
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        if code in {"LimitExceededException", "TooManyRequestsException"}:
+            raise HTTPException(status_code=429, detail="Please wait before requesting another reset code.") from exc
+        if code not in {"UserNotFoundException", "InvalidParameterException", "NotAuthorizedException"}:
+            raise HTTPException(status_code=502, detail="Could not send a reset code. Please try again later.") from exc
+    # Do not disclose whether the email is registered, verified or disabled.
+    return {"message": "If this email belongs to a verified account, a password reset code has been sent. Check your inbox and spam folder."}
+
+
+@router.post("/reset-password")
+async def reset_password(payload: ResetPasswordRequest):
+    if settings.AUTH_BACKEND != "cognito":
+        raise HTTPException(status_code=404, detail="Password recovery requires Cognito authentication")
+    try:
+        await cognito.confirm_forgot_password(str(payload.email), payload.code, payload.password)
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        if code in {"LimitExceededException", "TooManyRequestsException", "TooManyFailedAttemptsException"}:
+            raise HTTPException(status_code=429, detail="Too many attempts. Please wait and request a new reset code.") from exc
+        if code in {"InvalidPasswordException", "PasswordHistoryPolicyViolationException"}:
+            raise HTTPException(status_code=400, detail="Choose a new password with at least 8 characters, uppercase, lowercase, a number and a symbol.") from exc
+        raise HTTPException(status_code=400, detail="The reset code is invalid or expired. Request a new code and try again.") from exc
+    return {"message": "Password updated. Sign in with your new password."}
 
 
 @router.post("/resend-confirmation")

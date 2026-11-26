@@ -203,6 +203,18 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
 
+  forgotPassword: (email: string) =>
+    request<{ message: string }>("/api/auth/forgot-password", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+
+  resetPassword: (email: string, code: string, password: string) =>
+    request<{ message: string }>("/api/auth/reset-password", {
+      method: "POST",
+      body: JSON.stringify({ email, code, password }),
+    }),
+
   demoAuth: () =>
     request<TokenResponse & { demo_workspace_id?: string; demo_api_key?: string }>(
       "/api/auth/demo",

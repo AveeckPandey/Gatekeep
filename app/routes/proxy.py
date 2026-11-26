@@ -28,6 +28,7 @@ from app.security.detector import (
 from app.security.rate_limiter import workspace_rate_limiter
 from app.security.ssrf import validate_upstream_url
 from app.security.stream_dlp import StreamingDlpSanitizer
+from app.security.upstream_protocol import UpstreamProtocolError, iter_sse_data, validate_completion
 
 router = APIRouter(tags=["Data Plane Proxy"])
 
@@ -39,6 +40,10 @@ _ALLOWED_CONTENT_PART_KEYS = {"type", "text", "cache_control", "annotations"}
 
 class UnsupportedFormatError(ValueError):
     """Raised when a proxy payload contains an unsupported or uninspectable format."""
+
+    def __init__(self, message: str, inspection=None):
+        super().__init__(message)
+        self.inspection = inspection
 
 
 class _InspectionAccumulator:
@@ -71,6 +76,14 @@ class _InspectionAccumulator:
         elif res.action == "REDACT" and self.action != "BLOCK":
             self.action = "REDACT"
         return res.sanitized_text
+
+    def inspect_property_name(self, name: str) -> None:
+        # Renaming a JSON key can break required/$ref and tool contracts.
+        if self.inspect_text(name) != name:
+            raise UnsupportedFormatError(
+                "Sensitive JSON property name cannot be redacted safely; rename the property",
+                inspection=self,
+            )
 
 
 def inspect_and_sanitize_content(
@@ -107,7 +120,7 @@ def _inspect_json_strings(
     skip_entropy: bool = False,
     reject_media: bool = True,
 ) -> Any:
-    """Recursively inspect all string values in supported JSON structures."""
+    """Inspect JSON values and identifiers without silently renaming schema keys."""
     if value is None or isinstance(value, (bool, int, float)):
         return value
 
@@ -143,6 +156,7 @@ def _inspect_json_strings(
 
         sanitized_dict: Dict[str, Any] = {}
         for k, v in value.items():
+            acc.inspect_property_name(k)
             key_skip_entropy = skip_entropy or (k in _STRUCTURAL_KEYS_SKIP_ENTROPY)
             # Tool/function identifiers like `calculate_monthly_revenue` can trip entropy checks;
             # still run deterministic secret/PII/injection regexes on `function.name`.
@@ -153,7 +167,7 @@ def _inspect_json_strings(
             sanitized_dict[k] = _inspect_json_strings(
                 v,
                 acc,
-                context=f"{context}.{k}",
+                context=f"{context}.{k}" if not acc.is_blocked else "JSON property",
                 skip_entropy=key_skip_entropy,
                 reject_media=reject_media,
             )
@@ -192,10 +206,12 @@ def _inspect_message_content(
                 sanitized_list.append(_inspect_json_strings(item, acc, context=f"content[{idx}]", reject_media=False))
                 continue
 
+            for key in item:
+                acc.inspect_property_name(key)
             unknown_keys = set(item.keys()) - _ALLOWED_CONTENT_PART_KEYS
             if strict and unknown_keys:
                 raise UnsupportedFormatError(
-                    f"Unsupported field(s) {sorted(unknown_keys)} in text content part at index {idx}"
+                    f"Unsupported fields in text content part at index {idx}"
                 )
 
             item_copy = dict(item)
@@ -293,6 +309,7 @@ def _validate_and_inspect_message(
     for extra_key in list(msg_copy.keys()):
         if extra_key in known_keys:
             continue
+        acc.inspect_property_name(extra_key)
         if extra_key in _UNSUPPORTED_MEDIA_KEYS and msg_copy[extra_key] is not None:
             raise UnsupportedFormatError(
                 f"Unsupported media field '{extra_key}' in message {msg_idx}"
@@ -300,7 +317,7 @@ def _validate_and_inspect_message(
         msg_copy[extra_key] = _inspect_json_strings(
             msg_copy[extra_key],
             acc,
-            context=f"messages[{msg_idx}].{extra_key}",
+            context=f"messages[{msg_idx}] extra field",
         )
 
     return msg_copy
@@ -372,7 +389,8 @@ def _validate_and_inspect_payload(
     for key, val in list(forward_dict.items()):
         if key in skip_top_level:
             continue
-        forward_dict[key] = _inspect_json_strings(val, acc, context=key)
+        acc.inspect_property_name(key)
+        forward_dict[key] = _inspect_json_strings(val, acc, context="request extra field")
 
     return forward_dict, acc
 
@@ -451,7 +469,7 @@ def _inspect_non_streaming_response(
                 if isinstance(tc, dict) and isinstance(tc.get("function"), dict):
                     fn = tc["function"]
                     if isinstance(fn.get("name"), str):
-                        sanitized_name = resp_acc.inspect_text(fn["name"])
+                        sanitized_name = resp_acc.inspect_text(fn["name"], check_entropy=False)
                         if policy.mode != PolicyMode.ALLOW:
                             fn["name"] = sanitized_name
                     if isinstance(fn.get("arguments"), str):
@@ -462,7 +480,7 @@ def _inspect_non_streaming_response(
         function_call = choice_msg.get("function_call")
         if isinstance(function_call, dict):
             if isinstance(function_call.get("name"), str):
-                sanitized_name = resp_acc.inspect_text(function_call["name"])
+                sanitized_name = resp_acc.inspect_text(function_call["name"], check_entropy=False)
                 if policy.mode != PolicyMode.ALLOW:
                     function_call["name"] = sanitized_name
             if isinstance(function_call.get("arguments"), str):
@@ -526,6 +544,7 @@ async def chat_completions_proxy(
         forward_dict, acc = _validate_and_inspect_payload(payload, policy)
     except UnsupportedFormatError as exc:
         detail = str(exc)
+        failed_acc = exc.inspection
         await _record_audit_log(
             repo,
             workspace_id=workspace.id,
@@ -534,8 +553,8 @@ async def chat_completions_proxy(
             action="ERROR",
             is_blocked=False,
             block_reason=detail,
-            findings=[],
-            inspection_ms=0.0,
+            findings=[f.model_dump() for f in failed_acc.findings] if failed_acc else [],
+            inspection_ms=failed_acc.inspection_ms if failed_acc else 0.0,
             upstream_ms=None,
             start_total=start_total,
         )
@@ -764,31 +783,30 @@ async def chat_completions_proxy(
             overall_action = acc.action
             done_sent = False
             try:
-                async for line in upstream_resp.aiter_lines():
-                    if not line:
-                        continue
-                    if line.startswith("data: "):
-                        data_str = line[6:].strip()
-                        if data_str == "[DONE]":
-                            for flushed_chunk in sanitizer.flush_all():
-                                yield f"data: {json.dumps(flushed_chunk)}\n\n"
-                            yield "data: [DONE]\n\n"
-                            done_sent = True
-                            break
-                        try:
-                            chunk_json = json.loads(data_str)
-                            for out_chunk in sanitizer.process_chunk(chunk_json):
-                                yield f"data: {json.dumps(out_chunk)}\n\n"
-                        except json.JSONDecodeError:
-                            yield f"{line}\n\n"
-                    else:
-                        yield f"{line}\n\n"
+                async for data_str in iter_sse_data(upstream_resp.aiter_lines()):
+                    if data_str.strip() == "[DONE]":
+                        if not sanitizer.seen_choices:
+                            raise UpstreamProtocolError("Upstream stream contained no completion")
+                        for flushed_chunk in sanitizer.flush_all():
+                            yield f"data: {json.dumps(flushed_chunk)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        done_sent = True
+                        break
+                    try:
+                        chunk_json = json.loads(data_str)
+                    except ValueError as exc:
+                        raise UpstreamProtocolError("Upstream returned invalid SSE JSON") from exc
+                    for out_chunk in sanitizer.process_chunk(chunk_json):
+                        yield f"data: {json.dumps(out_chunk)}\n\n"
 
                 if not done_sent:
+                    if not sanitizer.is_complete:
+                        raise UpstreamProtocolError("Upstream stream ended before completion")
                     for flushed_chunk in sanitizer.flush_all():
                         yield f"data: {json.dumps(flushed_chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
             except Exception as exc:
-                stream_error = str(exc)
+                stream_error = str(exc) if isinstance(exc, UpstreamProtocolError) else "Upstream stream interrupted"
                 yield f"data: {json.dumps({'error': {'message': f'Stream interrupted: {stream_error}'}})}\n\n"
                 yield "data: [DONE]\n\n"
             finally:
@@ -907,8 +925,9 @@ async def chat_completions_proxy(
 
         try:
             upstream_data = upstream_resp.json()
+            validate_completion(upstream_data)
         except Exception as exc:
-            detail = "Upstream returned invalid JSON response"
+            detail = str(exc) if isinstance(exc, UpstreamProtocolError) else "Upstream returned invalid JSON response"
             await _record_audit_log(
                 repo,
                 workspace_id=workspace.id,
@@ -925,7 +944,25 @@ async def chat_completions_proxy(
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
 
     # 6. Response DLP (Output Inspection)
-    response_findings = _inspect_non_streaming_response(upstream_data, policy, acc)
+    try:
+        response_findings = _inspect_non_streaming_response(upstream_data, policy, acc)
+    except UnsupportedFormatError as exc:
+        detail = "Upstream response contains a structure that cannot be inspected safely"
+        failed_acc = exc.inspection
+        await _record_audit_log(
+            repo,
+            workspace_id=workspace.id,
+            key_id=api_key.id,
+            model=payload.model,
+            action="ERROR",
+            is_blocked=False,
+            block_reason=detail,
+            findings=serialized_req_findings + ([f.model_dump() for f in failed_acc.findings] if failed_acc else []),
+            inspection_ms=inspection_duration_ms + (failed_acc.inspection_ms if failed_acc else 0.0),
+            upstream_ms=upstream_duration_ms,
+            start_total=start_total,
+        )
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
     inspection_duration_ms = round(acc.inspection_ms, 3)
 
     # 7. Extract token usage and build aegisgate_meta

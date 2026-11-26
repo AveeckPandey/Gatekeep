@@ -1,10 +1,13 @@
-name: GateKeep CI/CD & Security Verification
+name: GateKeep CI & Security Verification
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
+    branches: [main, master]
+
+permissions:
+  contents: read
 
 jobs:
   backend-security-and-tests:
@@ -37,8 +40,9 @@ jobs:
       - name: Run Pytest Test Suite
         env:
           REPOSITORY_BACKEND: in_memory
-          JWT_SECRET_KEY: ci-cd-testing-secret-key-32-chars-long
-          GATEKEEP_ENCRYPTION_KEY: Z2F0ZWtlZXAtdGVzdC1mZXJuZXQta2V5LTMyYnl0ZXM=
+          AUTH_BACKEND: local
+          ENV: development
+          ENABLE_DEMO_ENDPOINT: "true"
         run: |
           pytest -v
 
@@ -70,29 +74,5 @@ jobs:
           NEXT_PUBLIC_API_URL: https://api.gatekeep.local
         run: npm run build
 
-  deploy-lambda:
-    name: Auto Deploy to AWS Lambda (Main Branch)
-    needs: [backend-security-and-tests, frontend-build]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Package & Deploy to AWS Lambda
-        run: |
-          python -m pip install --upgrade pip
-          pip install boto3
-          python scripts/deploy_aws.py --auto-confirm
+  # Production uses EC2. Deploy a verified checkout with scripts/deploy_ec2_update.py;
+  # this workflow deliberately does not provision or deploy the retired Lambda path.
